@@ -128,6 +128,7 @@ websearch_lastresponse = []
 preloaded_story = None
 chatcompl_adapter = None
 chatcompl_adapter_list = None #if using autoguess, will populate this will potential adapters
+regex_tools_loaded = None
 embedded_kailite = None
 embedded_kailite_gz = None
 embedded_kcpp_docs = None
@@ -734,7 +735,40 @@ def init_library():
             if os.path.exists(newpath):
                 os.add_dll_directory(newpath)
 
-    handle = ctypes.CDLL(os.path.join(dir_path, libname))
+    try:
+        handle = ctypes.CDLL(os.path.join(dir_path, libname))
+    except OSError:
+        if args.nomodel:
+            print("Warning: Library not found, using Mock Handle for testing.")
+            class MockOutput(ctypes.Structure):
+                _fields_ = [("status", ctypes.c_int), ("stopreason", ctypes.c_int), ("prompt_tokens", ctypes.c_int), ("completion_tokens", ctypes.c_int), ("text", ctypes.c_char_p)]
+            class MockFunc:
+                def __init__(self, name):
+                    self.name = name
+                    self.argtypes = []
+                    self.restype = None
+                def __call__(self, *args, **kwargs):
+                    if self.name == "generate":
+                        return MockOutput(1, 1, 10, 10, b"Mock Response trigger_me")
+                    if self.name == "get_chat_template":
+                        return b""
+                    if self.name == "load_model":
+                        return True
+                    if self.name == "token_count":
+                        class MockTokenCount(ctypes.Structure):
+                            _fields_ = [("count", ctypes.c_int), ("ids", ctypes.POINTER(ctypes.c_int))]
+                        return MockTokenCount(0, None)
+                    return 0
+            class MockHandle:
+                def __init__(self):
+                    self._funcs = {}
+                def __getattr__(self, name):
+                    if name not in self._funcs:
+                        self._funcs[name] = MockFunc(name)
+                    return self._funcs[name]
+            handle = MockHandle()
+        else:
+            raise
 
     handle.load_model.argtypes = [load_model_inputs]
     handle.load_model.restype = ctypes.c_bool
@@ -3322,6 +3356,101 @@ def get_my_epurl():
 ### A hacky simple HTTP server simulating a kobold api by Concedo
 ### we are intentionally NOT using flask, because we want MINIMAL dependencies
 #################################################################
+def run_middleware(script_path, payload):
+    try:
+        if not script_path or not os.path.exists(script_path):
+            return payload
+
+        cmd = [script_path]
+        if script_path.lower().endswith('.py'):
+             python_exe = sys.executable if not getattr(sys, 'frozen', False) else "python"
+             cmd = [python_exe, script_path]
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = process.communicate(input=json.dumps(payload))
+
+        if process.returncode != 0:
+            print(f"Middleware Error: {stderr}")
+            return payload
+
+        new_payload = json.loads(stdout)
+        if isinstance(new_payload, dict):
+            return new_payload
+    except Exception as e:
+        print(f"Middleware Failed: {e}")
+    return payload
+
+def load_regex_tools(config_path):
+    try:
+        if not config_path or not os.path.exists(config_path):
+            return []
+        with open(config_path, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading regex tools: {e}")
+        return []
+
+def process_regex_triggers(text):
+    global regex_tools_loaded, args
+    if regex_tools_loaded is None:
+        regex_tools_loaded = load_regex_tools(args.regex_tools)
+
+    if not regex_tools_loaded:
+        return text
+
+    modified_text = text
+    for tool in regex_tools_loaded:
+        pattern = tool.get("regex")
+        command = tool.get("action")
+        group = tool.get("group", 0)
+
+        if not pattern or not command:
+            continue
+
+        def replacement(match):
+            try:
+                matched_str = match.group(group)
+
+                cmd = [command]
+                if command.lower().endswith('.py'):
+                     python_exe = sys.executable if not getattr(sys, 'frozen', False) else "python"
+                     cmd = [python_exe, command]
+
+                # Execute
+                process = subprocess.Popen(
+                    cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                stdout, stderr = process.communicate(input=matched_str)
+
+                if process.returncode != 0:
+                    print(f"Regex Tool Error ({command}): {stderr}")
+                    return matched_str # Return original if failed
+
+                if stdout:
+                    return stdout.rstrip('\n') # remove trailing newline often added by print
+                return matched_str
+
+            except Exception as e:
+                print(f"Regex Tool Exception: {e}")
+                return match.group(0)
+
+        try:
+            modified_text = re.sub(pattern, replacement, modified_text)
+        except re.error as e:
+            print(f"Invalid Regex Pattern '{pattern}': {e}")
+
+    return modified_text
+
 class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
     sys_version = "1"
     server_version = "KoboldCppServer"
@@ -3423,6 +3552,9 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
         if not washordereq:
             global last_non_horde_req_time
             last_non_horde_req_time = time.time()
+
+        # Process Regex Tools
+        recvtxt = process_regex_triggers(recvtxt)
 
         utfprint("\nOutput: " + recvtxt,1)
 
@@ -4838,6 +4970,9 @@ Change Mode<br>
 
                 if args.foreground:
                     bring_terminal_to_foreground()
+
+                if api_format > 0 and args.middleware:
+                    genparams = run_middleware(args.middleware, genparams)
 
                 if api_format > 0: #text gen
                     # Check if streaming chat completions, if so, set stream mode to true
@@ -9019,6 +9154,8 @@ if __name__ == '__main__':
     advparser.add_argument("--device", "-dev", metavar=('<dev1,dev2,..>'), help="Set llama.cpp compatible device selection override. Comma separated. Overrides normal device choices.", default="")
     advparser.add_argument("--downloaddir", metavar=('[directory]'), help="Specify a directory that models will be downloaded to or searched from, if unset uses the working directory.", default="")
     advparser.add_argument("--autofitpadding", metavar=('[padding in MB]'), help="How much spare allowance in MB should autofit reserve? If it's too little, the load might fail.", type=int, default=default_autofit_padding)
+    advparser.add_argument("--middleware", metavar=('[filepath]'), help="Specify a path to a middleware script to intercept and modify the prompt.", default="")
+    advparser.add_argument("--regex_tools", metavar=('[filepath]'), help="Specify a path to a JSON config file for regex-triggered tool calling.", default="")
 
     hordeparsergroup = parser.add_argument_group('Horde Worker Commands')
     hordeparsergroup.add_argument("--hordemodelname", metavar=('[name]'), help="Sets your AI Horde display model name.", default="")
