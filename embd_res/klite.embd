@@ -4189,6 +4189,7 @@ Current version indicated by LITEVER below.
 	var selected_workers = [];
 	//gametext_arr stores images inline, with the special format [<|p|id|p|>] or [<|h|hash|h|>], which is either a hash for loaded media data, or an ID for pending requests
 	var gametext_arr = []; //array of texts currently displayed
+	var gametext_alternatives = []; //array of arrays of alternative texts
 	var alt_gametext_branches = []; //array of arrays of alternative history branches
 	var redo_arr = []; //array of texts that are in the redo stack
 	var retry_prev_text = []; //when we retry, save the last 3 versions in case they want to undo
@@ -4206,6 +4207,22 @@ Current version indicated by LITEVER below.
 	var current_memory = ""; //stored memory
 	var current_anote = ""; //stored author note
 	var current_anotetemplate = "[Author\'s note: <|>]";
+
+	var pending_summary_cutoff_index = 0;
+	var auto_summary_prompt_template = "Focus STRICTLY on the following elements:\n" +
+"1. State Changes: New locations discovered, items acquired or lost, and changes to the physical environment.\n" +
+"2. Relationship Dynamics: Shifts in character relationships, newly established rules between characters, or revealed secrets.\n" +
+"3. Active Goals: What the characters are currently trying to accomplish.\n" +
+"\n" +
+"Do NOT write a conversational play-by-play. Do NOT include minor dialogue exchanges. Compress the information into a dense, objective, third-person overview.\n" +
+"\n" +
+"[Existing Memory]:\n" +
+"{previous_summary}\n" +
+"\n" +
+"[Recent Events to Summarize]:\n" +
+"{new_context_chunk}\n" +
+"\n" +
+"Output ONLY the updated, combined memory block. Ensure any critical established rules from the [Existing Memory] are preserved in your new output.";
 
 	var anote_strength = 320; //distance from end
 	var newlineaftermemory = true;
@@ -4482,6 +4499,8 @@ Current version indicated by LITEVER below.
 	var passed_ai_warning_local = false;
 	var welcome = "";
 	var personal_notes = "";
+	var character_system_prompt = "";
+	var character_alt_greetings = [];
 	var voice_typing_mode = 0; //0=off, 1=on, 2=ptt, 3=ttt
 	var koboldcpp_has_whisper = false; //does backend support voice typing
 	var voice_is_recording = false; //currently recording voice?
@@ -4511,6 +4530,7 @@ Current version indicated by LITEVER below.
 	var avoidwelcome = false;
 
 	var localsettings = {
+		auto_summarize: false,
 		my_api_key: "0000000000", //put here so it can be saved and loaded in persistent mode
 		saved_oai_key: "", //do not ever share this in save files!
 		saved_oai_addr: default_oai_base, //do not ever share this in save files!
@@ -11226,7 +11246,7 @@ Current version indicated by LITEVER below.
 	function character_creator()
 	{
 		hide_popups();
-		document.getElementById("charcreator_name").value = document.getElementById("charcreator_persona").value = document.getElementById("charcreator_scenario").value = document.getElementById("charcreator_greeting").value = "";
+		document.getElementById("charcreator_name").value = document.getElementById("charcreator_persona").value = document.getElementById("charcreator_scenario").value = document.getElementById("charcreator_greeting").value = document.getElementById("charcreator_cnotes").value = document.getElementById("charcreator_sysprompt").value = document.getElementById("charcreator_altgreetings").value = "";
 		document.getElementById("usecharactertemplate").checked = false;
 		document.getElementById("charactercreator").classList.remove("hidden");
 		tempAestheticInstructUISettings = deepCopyAestheticSettings(aestheticInstructUISettings);
@@ -11264,6 +11284,11 @@ Current version indicated by LITEVER below.
 			let memory = persona?("{{char}} Persona: "+persona):"";
 			let greeting = document.getElementById("charcreator_greeting").value;
 			greeting = greeting?greeting:"Hello there!";
+
+			let cnotes = document.getElementById("charcreator_cnotes").value;
+			let sysprompt = document.getElementById("charcreator_sysprompt").value;
+			let altgreetings = document.getElementById("charcreator_altgreetings").value;
+
 			if(scenario!="")
 			{
 				scenario = "\n[Scenario: "+scenario+"]";
@@ -11280,6 +11305,10 @@ Current version indicated by LITEVER below.
 				let examples = "\n\n" + chatopponent + ": <add some example messages (hidden) for " + chatopponent + " here>";
 				combinedmem = introduction + character + genre + tags + scenario + examples;
 			}
+
+			if(cnotes) personal_notes = cnotes;
+			if(sysprompt) character_system_prompt = sysprompt;
+			if(altgreetings) character_alt_greetings = altgreetings.split("\n");
 
 			greeting = "\n{{char}}: "+ greeting;
 			restart_new_game(false);
@@ -15588,6 +15617,7 @@ Current version indicated by LITEVER below.
 		document.getElementById("compressnewlines").checked = localsettings.compressnewlines;
 		document.getElementById("render_special_tags").checked = localsettings.render_special_tags;
 		document.getElementById("request_logprobs").checked = localsettings.request_logprobs;
+		document.getElementById("auto_summarize").checked = localsettings.auto_summarize;
 		document.getElementById("eos_ban_mode").value = localsettings.eos_ban_mode;
 		document.getElementById("persist_session").checked = localsettings.persist_session;
 		document.getElementById("opmode").value = localsettings.opmode;
@@ -16469,6 +16499,7 @@ Current version indicated by LITEVER below.
 		localsettings.compressnewlines = (document.getElementById("compressnewlines").checked ? true : false);
 		localsettings.render_special_tags = (document.getElementById("render_special_tags").checked ? true : false);
 		localsettings.request_logprobs = (document.getElementById("request_logprobs").checked ? true : false);
+		localsettings.auto_summarize = (document.getElementById("auto_summarize").checked ? true : false);
 		localsettings.eos_ban_mode = document.getElementById("eos_ban_mode").value;
 		localsettings.persist_session = (document.getElementById("persist_session").checked ? true : false);
 		localsettings.raw_instruct_tags = (document.getElementById("raw_instruct_tags").checked ? true : false);
@@ -17343,6 +17374,103 @@ Current version indicated by LITEVER below.
 		}
 	}
 
+	function perform_auto_summary() {
+		if (waiting_for_summarycall != 0) return;
+		if (!document.getElementById("auto_summarize").checked) return;
+
+		// Check token budget
+		var budget_element = document.getElementsByClassName("token-budget")[0];
+		if(!budget_element) return;
+		var budget_parts = budget_element.innerText.split("/");
+		if (budget_parts.length != 2) return;
+		var used = parseInt(budget_parts[0]);
+		var max = parseInt(budget_parts[1]);
+
+		if (isNaN(used) || isNaN(max) || max == 0) return;
+
+		if (used / max < 0.85) return; // Threshold 85%
+
+		// We need to summarize.
+		// Summarize enough chunks to reduce context significantly but leave recent history.
+		var chunk_count_to_summarize = 0;
+		var accumulated_len = 0;
+		var target_len = max * 0.20 * 3; // Approx chars to remove (3 chars per token est) - aim for 20% reduction
+
+		if (gametext_arr.length < 25) return; // Don't summarize if very few messages.
+
+		for (var i = 0; i < gametext_arr.length - 15; i++) { // Keep at least last 15 messages intact
+			accumulated_len += gametext_arr[i].length;
+			chunk_count_to_summarize++;
+			if (accumulated_len > target_len) break;
+		}
+
+		if (chunk_count_to_summarize < 2) return; // Need at least 2 chunks to summarize
+
+		pending_summary_cutoff_index = chunk_count_to_summarize;
+
+		var new_context_chunk = "";
+		for (var i = 0; i < pending_summary_cutoff_index; i++) {
+			new_context_chunk += gametext_arr[i] + "\n";
+		}
+
+		var previous_summary = current_memory;
+
+		var prompt = auto_summary_prompt_template.replace("{previous_summary}", previous_summary).replace("{new_context_chunk}", new_context_chunk);
+
+		waiting_for_summarycall = 3; // 3 for background summary
+
+		var submit_payload = {
+			"prompt": prompt,
+			"params": {
+				"n": 1,
+				"max_context_length": localsettings.max_context_length,
+				"max_length": 600,
+				"rep_pen": 1.1,
+				"temperature": 0.6,
+				"top_p": 0.92,
+				"sampler_order": localsettings.sampler_order
+			},
+			"models": selected_models.map((m) => { return m.name }),
+		};
+		if(localsettings.sampler_seed>=1) {
+			submit_payload.params.sampler_seed = localsettings.sampler_seed;
+		}
+		submit_payload.workers = selected_workers.map((m) => { return m.id });
+		submit_payload = finalize_submit_payload(submit_payload, false);
+
+		show_toast("Auto-summarizing context...");
+		dispatch_submit_generation(submit_payload, false);
+	}
+
+	function handle_incoming_background_summary(gentxt) {
+		waiting_for_summarycall = 0;
+		retry_in_progress = false;
+
+		if (!gentxt) return;
+
+		var new_memory = gentxt.trim();
+
+		save_gametext_history(); // Save state before modifying
+
+		current_memory = new_memory;
+		document.getElementById("memorytext").value = current_memory;
+
+		// Remove old chunks
+		gametext_arr.splice(0, pending_summary_cutoff_index);
+
+		// Also update alternatives array if it exists and matches length
+		if (typeof gametext_alternatives !== 'undefined') {
+			 if (gametext_alternatives.length >= pending_summary_cutoff_index) {
+				 gametext_alternatives.splice(0, pending_summary_cutoff_index);
+			 } else {
+				 gametext_alternatives = new Array(gametext_arr.length).fill(null).map(()=>[]);
+			 }
+		}
+
+		render_gametext();
+		show_toast("Context summarized!");
+	}
+
 	function handle_incoming_autosummary(gentxt)
 	{
 		retry_in_progress = false;
@@ -17621,6 +17749,7 @@ Current version indicated by LITEVER below.
 		idle_timer = 0;
 		idle_triggered_counter = 0;
 		gametext_arr = [];
+		gametext_alternatives = [];
 		redo_arr = [];
 		last_request_str = "No Requests Available";
 		last_request_timestamp = "";
@@ -17665,6 +17794,7 @@ Current version indicated by LITEVER below.
 		lastSearchResults = [];
 		toolcall_waiting_approve = null;
 		alt_gametext_branches = [];
+		gametext_alternatives = [];
 		if (!keep_memory)
 		{
 			personal_notes = "";
@@ -22620,6 +22750,17 @@ Current version indicated by LITEVER below.
 		if(gentxt!="")
 		{
 			gametext_arr.push(gentxt); //delete last message if retry is hit, since response was added
+
+			if (typeof gametext_alternatives !== 'undefined') {
+				while (gametext_alternatives.length < gametext_arr.length) {
+					gametext_alternatives.push([]);
+				}
+				let idx = gametext_arr.length - 1;
+				if (!gametext_alternatives[idx].includes(gentxt)) {
+					gametext_alternatives[idx].push(gentxt);
+				}
+			}
+
 			retry_preserve_last = false;
 		}
 		if(localsettings.beep_notify_mode==1 || localsettings.beep_notify_mode==3)
@@ -22638,6 +22779,7 @@ Current version indicated by LITEVER below.
 		document.getElementById("lastreq3").innerHTML = lastreq;
 		document.getElementById("lastreq1lp").innerHTML = document.getElementById("lastreq2lp").innerHTML =	document.getElementById("lastreq3lp").innerHTML = "";
 		update_logprobs_link();
+		perform_auto_summary();
 	}
 
 	function update_logprobs_link()
@@ -23670,6 +23812,10 @@ Current version indicated by LITEVER below.
 							{
 								handle_incoming_autosummary(gentxt);
 							}
+							else if(waiting_for_summarycall==3)
+							{
+								handle_incoming_background_summary(gentxt);
+							}
 							else
 							{
 								handle_incoming_text(gentxt, genworker, genmdl, genkudos);
@@ -24083,7 +24229,7 @@ Current version indicated by LITEVER below.
 
 	var insertAIVisionImages = []; //concat gametext will populate this
 	var insertAIAudioSounds = [];
-	function concat_gametext(stripimg = false, stripimg_replace_str = "", append_before_segment="",append_after_segment="",escapeTxt=false,insertAIVision=false) {
+	function concat_gametext(stripimg = false, stripimg_replace_str = "", append_before_segment="",append_after_segment="",escapeTxt=false,insertAIVision=false,injectIndices=false) {
 		let fulltxt = "";
 		for (let i = 0; i < gametext_arr.length; ++i) {
 			let extracted = (gametext_arr[i]);
@@ -24091,10 +24237,11 @@ Current version indicated by LITEVER below.
 			{
 				extracted = escape_html(extracted);
 			}
+			let idxTag = injectIndices ? `[<|idx:${i}|>]` : "";
 			if (extracted.trim() == "" || extracted.trim() == "\n") {
-				fulltxt += extracted;
+				fulltxt += (idxTag + extracted);
 			} else {
-				fulltxt += (append_before_segment + extracted + append_after_segment);
+				fulltxt += (idxTag + append_before_segment + extracted + append_after_segment);
 			}
 		}
 		//unscape special sequences
@@ -24591,7 +24738,7 @@ Current version indicated by LITEVER below.
 				let intro = render_regular_welcome();
 				document.getElementById("chat_msg_body").innerHTML = `<span class='unstarted_block'>${intro}</span>`;
 			} else {
-				textToRender = concat_gametext(false, "", "", "", true);
+				textToRender = concat_gametext(false, "", "", "", true, false, true);
 				if((localsettings.opmode==3 && localsettings.gui_type_chat==1) ||
 				(localsettings.opmode==4 && localsettings.gui_type_instruct==1))
 				{
@@ -25139,6 +25286,13 @@ Current version indicated by LITEVER below.
 		for(let i=0;i<combined_chunks.length;++i)
 		{
 			let curr = combined_chunks[i];
+			let idxmatch = curr.match(/\[<\|idx:(\d+)\|>\]/);
+			let gametext_idx = -1;
+			if(idxmatch) {
+				gametext_idx = parseInt(idxmatch[1]);
+				curr = curr.replace(idxmatch[0], "");
+			}
+
 			if(curr=="%HumanPlaceholder%")
 			{
 				myturnchat = true;
@@ -25152,6 +25306,7 @@ Current version indicated by LITEVER below.
 				if(allow_blank || curr.trim()!="")
 				{
 					chatunits.push({
+						gametext_idx: gametext_idx,
 					msg:curr,
 					myturn:myturnchat,
 					unlabelled_name:unlabelled_turns,
@@ -25344,21 +25499,36 @@ Current version indicated by LITEVER below.
 
 			if (start > lastIndex) {
 				// Opponent's turn (text before this match)
+				let msg = input.slice(lastIndex, start).trim();
+				let idxmatch = msg.match(/\[<\|idx:(\d+)\|>\]/);
+				let gametext_idx = -1;
+				if(idxmatch) {
+					gametext_idx = parseInt(idxmatch[1]);
+					msg = msg.replace(idxmatch[0], "");
+				}
 				result.push({
-					msg: input.slice(lastIndex, start).trim(),
-					myturn: false
+					msg: msg,
+					myturn: false,
+					gametext_idx: gametext_idx
 				});
 			}
 
 			// My turn
 			let mymsg = match[0].trim();
+			let idxmatch = mymsg.match(/\[<\|idx:(\d+)\|>\]/);
+			let gametext_idx = -1;
+			if(idxmatch) {
+				gametext_idx = parseInt(idxmatch[1]);
+				mymsg = mymsg.replace(idxmatch[0], "");
+			}
 			if(mymsg.startsWith("> "))
 			{
 				mymsg = mymsg.substring(2);
 			}
 			result.push({
 				msg: mymsg,
-				myturn: true
+				myturn: true,
+				gametext_idx: gametext_idx
 			});
 
 			lastIndex = end;
@@ -25366,9 +25536,17 @@ Current version indicated by LITEVER below.
 
 		// Any remaining text after last match is opponent's turn
 		if (lastIndex < input.length) {
+			let msg = input.slice(lastIndex).trim();
+			let idxmatch = msg.match(/\[<\|idx:(\d+)\|>\]/);
+			let gametext_idx = -1;
+			if(idxmatch) {
+				gametext_idx = parseInt(idxmatch[1]);
+				msg = msg.replace(idxmatch[0], "");
+			}
 			result.push({
-				msg: input.slice(lastIndex).trim(),
-				myturn: false
+				msg: msg,
+				myturn: false,
+				gametext_idx: gametext_idx
 			});
 		}
 
@@ -25922,8 +26100,17 @@ Current version indicated by LITEVER below.
 		let m_name = "\n" + localsettings.chatname + ": ";
 		var mynameregex = new RegExp("(" + localsettings.chatname + ")\: ", "gi");
 
+		let curr_gametext_idx = -1;
+
 		for(var i=0;i<input.length;++i)
 		{
+			let match_idx = input[i].match(/\[<\|idx:(\d+)\|>\]/);
+			if(match_idx)
+			{
+				curr_gametext_idx = parseInt(match_idx[1]);
+				input[i] = input[i].replace(/\[<\|idx:(\d+)\|>\]/g, "");
+			}
+
 			let tempfullsearchable = input[i]; //strip out images
 			let txtwithnoimages = tempfullsearchable.replace(/\[<\|[\s\S]+?\|>\]/g, "");
 			var foundopponent = txtwithnoimages.match(othernamesregex);
@@ -25945,7 +26132,8 @@ Current version indicated by LITEVER below.
 						msg:tempfullsearchable.split(localsettings.chatopponent+": ")[1],
 						myturn:myturnchat,
 						unlabelled_name: false,
-						unlabelled_img: false
+						unlabelled_img: false,
+						gametext_idx: curr_gametext_idx
 					});
 				}
 				else
@@ -25956,7 +26144,8 @@ Current version indicated by LITEVER below.
 						msg:tempfullsearchable.split(foundself[0])[1],
 						myturn:myturnchat,
 						unlabelled_name: false,
-						unlabelled_img: false
+						unlabelled_img: false,
+						gametext_idx: curr_gametext_idx
 					});
 				}
 			}
@@ -25968,7 +26157,8 @@ Current version indicated by LITEVER below.
 					msg:tempfullsearchable.split(foundopponent[0])[1],
 					myturn:myturnchat,
 					unlabelled_name: false,
-					unlabelled_img: false
+					unlabelled_img: false,
+					gametext_idx: curr_gametext_idx
 					});
 			}else{ //unknown sender, just use existing turn
 				if(chatunits.length==0)
@@ -25980,7 +26170,8 @@ Current version indicated by LITEVER below.
 						msg:tempfullsearchable,
 						myturn:myturnchat,
 						unlabelled_name: true,
-						unlabelled_img: true
+						unlabelled_img: true,
+						gametext_idx: curr_gametext_idx
 					});
 					}
 				}
@@ -27548,6 +27739,25 @@ Current version indicated by LITEVER below.
 		document.getElementById('aesthetic_text_preview').innerHTML = render_aesthetic_ui(preview,true);
 	}
 
+	function swipe_message(idx, direction) {
+		if (typeof gametext_alternatives === 'undefined' || !gametext_alternatives[idx]) return;
+		let alts = gametext_alternatives[idx];
+		let current_text = gametext_arr[idx];
+		let current_alt_idx = alts.indexOf(current_text);
+
+		if (current_alt_idx === -1) {
+			alts.push(current_text);
+			current_alt_idx = alts.length - 1;
+		}
+
+		let new_alt_idx = current_alt_idx + direction;
+		if (new_alt_idx < 0) new_alt_idx = alts.length - 1;
+		if (new_alt_idx >= alts.length) new_alt_idx = 0;
+
+		gametext_arr[idx] = alts[new_alt_idx];
+		render_gametext();
+	}
+
 	function render_aesthetic_ui(input, isPreview) //class suffix string used to prevent defined styles from leaking into global scope
 	{
 		const avatarImage = function(for_ai) { //todo: this is still bad code, but will keep it for now
@@ -27760,10 +27970,31 @@ Current version indicated by LITEVER below.
 				newbodystr += `${(showavatar?avatarImage(true):"")}
 				<div class='aui_aiturn_block'`;
 			}
+
+			let swipe_ui = "";
+			if (curr.gametext_idx !== undefined && curr.gametext_idx >= 0 && typeof gametext_alternatives !== 'undefined') {
+				let alts = gametext_alternatives[curr.gametext_idx];
+				if (alts && alts.length > 1) {
+					let current_text = gametext_arr[curr.gametext_idx];
+					let alt_idx = alts.indexOf(current_text);
+					if (alt_idx == -1) {
+						alts.push(current_text);
+						alt_idx = alts.length - 1;
+					}
+					let count = alts.length;
+					let display_idx = alt_idx + 1;
+					swipe_ui = `<div class="swipe-controls" style="font-size: 10px; opacity: 0.7; user-select: none; margin-bottom: 2px;">
+						<span style="cursor: pointer; font-weight: bold;" onclick="swipe_message(${curr.gametext_idx}, -1)">❮</span>
+						${display_idx}/${count}
+						<span style="cursor: pointer; font-weight: bold;" onclick="swipe_message(${curr.gametext_idx}, 1)">❯</span>
+					</div>`;
+				}
+			}
+
 			newbodystr += ` style='flex: 1; display:flex; padding: ${as.padding()}; margin: ${as.margin()}; min-height:${as.background_minHeight}px;`
 			+ ` font-size: ${as.font_size}px; flex-direction:column; align-items: ${as.centerHorizontally ? 'center' : 'flex-start'};`
 			+ ` justify-content: center; border-radius: ${as.rounded_bubbles ? '15px' : '0px'}'>`
-			+ `<div>${namepart}${curr.msg}</div></div></div>`;
+			+ `<div>${swipe_ui}${namepart}${curr.msg}</div></div></div>`;
 		}
 
 		return portraitsStyling + newbodystr.replaceAll(/(\r\n|\r|\n)/g,'<br>'); // Finally, convert newlines to HTML format and return the stylized string.
@@ -30370,6 +30601,11 @@ Current version indicated by LITEVER below.
 
 						<h3>Advanced Settings</h3>
 						<div class="settinglabel">
+							<div class="justifyleft">Auto Summarize Context <span class="helpicon">?<span
+								class="helptext">Automatically summarizes the oldest part of the context when the token limit is reached, moving it to memory.</span></span></div>
+							<input title="Auto Summarize" type="checkbox" id="auto_summarize" class="push-right">
+						</div>
+						<div class="settinglabel">
 							<div class="justifyleft">EOS token ban <span class="helpicon">?<span
 							class="helptext">Allow the End-Of-Stream (EOS) token and potentially other restricted special tokens to be generated.</span></span></div>
 							<div class="push-right">
@@ -30700,6 +30936,18 @@ Current version indicated by LITEVER below.
 				<div class="inlinelabel" style="padding-bottom: 4px;">
 					<div class="justifyleft" style="padding:4px">Character Greeting: </div>
 					<textarea class="form-control menuinput_multiline"  title="Character Greeting" placeholder="First message greeting (e.g. Hello, traveller!)" id="charcreator_greeting"></textarea>
+				</div>
+				<div class="inlinelabel" style="padding-bottom: 4px;">
+					<div class="justifyleft" style="padding:4px">Alternate Greetings: </div>
+					<textarea class="form-control menuinput_multiline"  title="Alternate Greetings" placeholder="Optional: One per line" id="charcreator_altgreetings"></textarea>
+				</div>
+				<div class="inlinelabel" style="padding-bottom: 4px;">
+					<div class="justifyleft" style="padding:4px">System Prompt: </div>
+					<textarea class="form-control menuinput_multiline"  title="System Prompt" placeholder="Optional: Overrides main system prompt" id="charcreator_sysprompt"></textarea>
+				</div>
+				<div class="inlinelabel" style="padding-bottom: 4px;">
+					<div class="justifyleft" style="padding:4px">Creator Notes: </div>
+					<textarea class="form-control menuinput_multiline"  title="Creator Notes" placeholder="Optional: Notes for the user" id="charcreator_cnotes"></textarea>
 				</div>
 				After creating your character, you can edit it further at any time in the 'Context' memory window.
 			</div>
