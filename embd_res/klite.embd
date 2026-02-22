@@ -28333,7 +28333,7 @@ Current version indicated by LITEVER below.
 		<div id="outerbodybg"></div>
 		<div id="topmenu" class="topmenu">
 			<div style="width: 100%;">
-				<button title="Main Menu Options" class="navtoggler mainnav" type="button" onclick="toggleTopNav()">
+				<button title="Main Menu Options" aria-label="Main Menu Options" class="navtoggler mainnav" type="button" onclick="toggleTopNav()">
 					<span class="navbar-button-bar"></span>
 					<span class="navbar-button-bar"></span>
 					<span class="navbar-button-bar"></span>
@@ -28482,15 +28482,15 @@ Current version indicated by LITEVER below.
 
 				<div class="cht_inp_hold_outer">
 					<div class="cht_inp_hold">
-					<button title="Show Groupchat Selection" onclick="show_groupchat_select()" id="chat_btnmode_chat" class="chat_btnmode_chat hidden mainnav" type="button"></button>
-					<button title="Toggle Adventure Mode" onclick="btn_adventure_mode()" id="chat_btnmode_adventure" class="chat_btnmode_adventure actionmode hidden mainnav" type="button"></button>
+					<button title="Show Groupchat Selection" aria-label="Show Groupchat Selection" onclick="show_groupchat_select()" id="chat_btnmode_chat" class="chat_btnmode_chat hidden mainnav" type="button"></button>
+					<button title="Toggle Adventure Mode" aria-label="Toggle Adventure Mode" onclick="btn_adventure_mode()" id="chat_btnmode_adventure" class="chat_btnmode_adventure actionmode hidden mainnav" type="button"></button>
 					<div id="cht_inp_bg" class="cht_inp_bg">
 					<div class="cht_inp_bg_inner" id="cht_inp_lengthtester" style="white-space: nowrap; visibility: hidden; height: 0px; position:absolute; width: auto;"></div>
 					<textarea title="User Input" class="cht_inp_bg_inner mainnav" id="cht_inp" name="chtchtinp"  role="presentation" autocomplete="noppynop" spellcheck="true" rows="1" wrap="on" placeholder="Type a message" oninput="update_submit_button();chat_resize_input();" onpaste="return img_paste_event(event)" onkeypress="return chat_handle_typing(event)"></textarea>
 					</div>
-					<button title="Submit" onclick="submit_generation_button(true)" onmousedown="ptt_start()" onmouseup="ptt_end()" id="chat_msg_send_btn" class="chat_msg_send_btn mainnav" type="button"></button>
-					<button title="Abort" onclick="abort_generation()" id="chat_msg_send_btn_abort" class="hidden chat_msg_send_btn_abort mainnav" type="button"></button>
-					<button title="Toggle Action Menu" type="button" class="chat_msg_cust_btn mainnav" id="btn_chat_cust" onclick="chat_toggle_actionmenu()"></button>
+					<button title="Submit" aria-label="Submit" onclick="submit_generation_button(true)" onmousedown="ptt_start()" onmouseup="ptt_end()" id="chat_msg_send_btn" class="chat_msg_send_btn mainnav" type="button"></button>
+					<button title="Abort" aria-label="Abort" onclick="abort_generation()" id="chat_msg_send_btn_abort" class="hidden chat_msg_send_btn_abort mainnav" type="button"></button>
+					<button title="Toggle Action Menu" aria-label="Toggle Action Menu" type="button" class="chat_msg_cust_btn mainnav" id="btn_chat_cust" onclick="chat_toggle_actionmenu()"></button>
 					</div>
 				</div>
 
