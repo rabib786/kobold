@@ -7390,25 +7390,6 @@ def convert_invalid_args(args):
         dict["lowvram"] = True
     if "batchsize" not in dict and "blasbatchsize" in dict and dict["blasbatchsize"]:
         dict["batchsize"] = dict["blasbatchsize"]
-    if "sdconfig" in dict and dict["sdconfig"] and len(dict["sdconfig"])>0:
-        dict["sdmodel"] = dict["sdconfig"][0]
-        if dict["sdconfig"] and len(dict["sdconfig"]) > 1:
-            dict["sdclamped"] = 512
-        if dict["sdconfig"] and len(dict["sdconfig"]) > 2:
-            dict["sdthreads"] = int(dict["sdconfig"][2])
-        if dict["sdconfig"] and len(dict["sdconfig"]) > 3:
-            dict["sdquant"] = (2 if dict["sdconfig"][3]=="quant" else 0)
-    if "hordeconfig" in dict and dict["hordeconfig"] and dict["hordeconfig"][0]!="":
-        dict["hordemodelname"] = dict["hordeconfig"][0]
-        if len(dict["hordeconfig"]) > 1:
-            dict["hordegenlen"] = int(dict["hordeconfig"][1])
-        if len(dict["hordeconfig"]) > 2:
-            dict["hordemaxctx"] = int(dict["hordeconfig"][2])
-        if len(dict["hordeconfig"]) > 4:
-            dict["hordekey"] = dict["hordeconfig"][3]
-            dict["hordeworkername"] = dict["hordeconfig"][4]
-    if "noblas" in dict and dict["noblas"]:
-        dict["usecpu"] = True
     if "failsafe" in dict and dict["failsafe"]: #failsafe implies noavx2
         dict["noavx2"] = True
     if "skiplauncher" in dict and dict["skiplauncher"]:
@@ -9071,9 +9052,6 @@ if __name__ == '__main__':
     admingroup.add_argument("--admindir", metavar=('[directory]'), help="Specify a directory to look for .kcpps configs in, which can be used to swap models.", default="")
 
     deprecatedgroup = parser.add_argument_group('Deprecated Commands, DO NOT USE!')
-    deprecatedgroup.add_argument("--hordeconfig", help=argparse.SUPPRESS, nargs='+')
-    deprecatedgroup.add_argument("--sdconfig", help=argparse.SUPPRESS, nargs='+')
-    compatgroup.add_argument("--noblas", help=argparse.SUPPRESS, action='store_true')
     compatgroup3.add_argument("--nommap","--no-mmap", help=argparse.SUPPRESS, action='store_true')
     deprecatedgroup.add_argument("--pipelineparallel", help=argparse.SUPPRESS, action='store_true') #changed to nopipelineparallel
     deprecatedgroup.add_argument("--sdnotile", help=argparse.SUPPRESS, action='store_true') # legacy option, see sdtiledvae
