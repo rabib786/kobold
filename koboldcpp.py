@@ -2332,7 +2332,7 @@ def tokenize_ids(countprompt,tcaddspecial):
     rawcountdata = handle.token_count(countprompt.encode("UTF-8"),tcaddspecial)
     countlimit = rawcountdata.count if (rawcountdata.count>=0 and rawcountdata.count<50000) else 0
     # the above protects the server in case the count limit got corrupted
-    countdata = [rawcountdata.ids[i] for i in range(countlimit)]
+    countdata = rawcountdata.ids[:countlimit]
     return countdata
 
 def detokenize_ids(tokids):
