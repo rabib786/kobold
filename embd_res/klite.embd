@@ -3464,6 +3464,43 @@ Current version indicated by LITEVER below.
 	.bolded {
 		font-weight: bold;
 	}
+
+	/* Mobile Optimizations */
+	@media (pointer: coarse) {
+		input[type=range] {
+			height: 24px;
+		}
+		input[type=range]::-webkit-slider-thumb {
+			width: 24px;
+			height: 24px;
+			-webkit-appearance: none;
+			background: var(--theme_color_accent_fg);
+			border: 1px solid var(--theme_color_border);
+			border-radius: 50%;
+			cursor: pointer;
+		}
+		input[type=range]::-moz-range-thumb {
+			width: 24px;
+			height: 24px;
+			background: var(--theme_color_accent_fg);
+			border: 1px solid var(--theme_color_border);
+			border-radius: 50%;
+			cursor: pointer;
+		}
+
+		/* Sidebar Toggle for Settings */
+		#settingscontainer .nspopup.flexsize, #profilercontainer .nspopup.flexsize {
+			width: 100% !important;
+			margin-top: 0 !important;
+			top: 0 !important;
+			height: 100% !important;
+			border-radius: 0 !important;
+			border: none !important;
+		}
+		.settingsbody {
+			height: calc(100% - 100px) !important;
+		}
+	}
 	</style>
 
 	<script id="third-party.min">
@@ -28816,6 +28853,10 @@ Current version indicated by LITEVER below.
 							<a class="nav-link mainnav" href="#" id="btn_settings"
 								onclick="closeTopNav();display_settings()">Settings</a>
 						</li>
+						<li class="nav-item hidden" id="topbtn_profiler">
+							<a class="nav-link mainnav" href="#" id="btn_profiler"
+								onclick="closeTopNav();display_profiler_container()">Profiler</a>
+						</li>
 
 						<li class="nav-item hidden" id="topbtn_multiplayer_join">
 							<a class="nav-link mainnav" href="#" onclick="join_multiplayer()">Join Multiplayer</a>
@@ -30710,6 +30751,70 @@ Current version indicated by LITEVER below.
 		<div id="settings_panel_handle" class="panel-handle right hidden" title="Toggle Left Panel" onclick="toggle_sidepanel_left()"></div>
 	</div>
 
+	<div class="popupcontainer flex hidden" id="profilercontainer">
+		<div class="popupbg flex"></div>
+		<div class="nspopup flexsize" style="margin-top: 60px;">
+			<div class="popuptitlebar">
+				<div class="popuptitletext">System Profiler</div>
+			</div>
+			<div class="menutext" style="text-align: left; padding: 10px;">
+				<div id="profiler_content">
+					<!-- Memory -->
+					<div class="borderbox" style="margin-bottom: 10px;">
+						<h4 style="margin-top: 0;">System Memory <span id="unified_badge" class="badge bg_primary hidden" style="font-size: 10px; padding: 2px 4px; border-radius: 4px;">Unified</span></h4>
+						<div id="memory_bars">
+							<div>RAM: <span id="ram_text"></span></div>
+							<div style="background: #333; height: 10px; width: 100%; border-radius: 5px; margin-bottom: 5px;">
+								<div id="ram_bar" style="background: #28a745; height: 100%; width: 0%; border-radius: 5px;"></div>
+							</div>
+							<div id="vram_container">
+								<div>VRAM: <span id="vram_text"></span></div>
+								<div style="background: #333; height: 10px; width: 100%; border-radius: 5px;">
+									<div id="vram_bar" style="background: #17a2b8; height: 100%; width: 0%; border-radius: 5px;"></div>
+								</div>
+							</div>
+						</div>
+					</div>
+
+					<!-- Backend -->
+					<div class="borderbox" style="margin-bottom: 10px;">
+						<h4 style="margin-top: 0;">Compute Backend <span id="npu_badge" class="badge bg_purple hidden" style="font-size: 10px; padding: 2px 4px; border-radius: 4px;">NPU Active</span></h4>
+						<div>API: <span id="backend_api" class="bolded"></span></div>
+						<div>Device: <span id="backend_device" class="bolded"></span></div>
+					</div>
+
+					<!-- Model Allocation -->
+					<div class="borderbox" style="margin-bottom: 10px;">
+						<h4 style="margin-top: 0;">Model Allocation</h4>
+						<div style="display:flex; justify-content: space-between;">
+							<div>Total Layers: <span id="model_layers"></span></div>
+							<div>Offloaded: <span id="model_offloaded"></span></div>
+						</div>
+						<div>Context Allocated: <span id="model_ctx_mem"></span></div>
+					</div>
+
+					<!-- Realtime Metrics -->
+					<div class="borderbox">
+						<h4 style="margin-top: 0;">Realtime Metrics</h4>
+						<div style="display: flex; flex-wrap: wrap;">
+							<div style="width: 50%;">Prompt Eval: <span id="metric_eval_ms"></span> ms</div>
+							<div style="width: 50%;">Eval Speed: <span id="metric_eval_speed"></span> T/s</div>
+							<div style="width: 50%;">Generation: <span id="metric_gen_ms"></span> ms</div>
+							<div style="width: 50%;">Gen Speed: <span id="metric_gen_speed"></span> T/s</div>
+							<div style="width: 100%; margin-top: 5px;">Tokens (Last Turn): <span id="metric_tokens"></span></div>
+						</div>
+						<div id="profiler_chart_container" style="position: relative; width: 100%; height: 100px; margin-top: 10px; background: #222; border: 1px solid #444;">
+							<canvas id="profiler_chart" width="100%" height="100"></canvas>
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="popupfooter">
+				<button type="button" class="btn btn-primary" onclick="hide_popups();stop_profiler_poll()">Close</button>
+			</div>
+		</div>
+	</div>
+
 	<div class="popupcontainer flex hidden" id="aestheticsettingscontainer">
 		<div class="popupbg flex"></div>
 		<div class="nspopup highest" style="margin-left: 20px; margin-right: 20px;">
@@ -31959,6 +32064,170 @@ Current version indicated by LITEVER below.
 	<input type="file" id="tempfilepicker" style="display:none;" accept="*">
 
 	<script id="pwa-setup">
+	// Profiler Logic
+	var profiler_interval = null;
+	var profiler_history = [];
+
+	function display_profiler_container() {
+		hide_popups();
+		document.getElementById("profilercontainer").classList.remove("hidden");
+		poll_profiler();
+		profiler_interval = setInterval(poll_profiler, 1000);
+	}
+
+	function stop_profiler_poll() {
+		if (profiler_interval) {
+			clearInterval(profiler_interval);
+			profiler_interval = null;
+		}
+	}
+
+	function poll_profiler() {
+		fetch("/api/extra/profiler")
+		.then(response => response.json())
+		.then(data => update_profiler_ui(data))
+		.catch(err => console.error("Profiler Poll Error:", err));
+	}
+
+	function update_profiler_ui(data) {
+		if (!data) return;
+
+		// Memory
+		var mem = data.system_memory;
+		var ram_p = (mem.ram_used_mb / mem.ram_total_mb) * 100;
+		document.getElementById("ram_text").innerText = mem.ram_used_mb.toFixed(0) + " / " + mem.ram_total_mb.toFixed(0) + " MB";
+		document.getElementById("ram_bar").style.width = ram_p + "%";
+
+		if (mem.unified_memory) {
+			document.getElementById("unified_badge").classList.remove("hidden");
+			document.getElementById("vram_container").classList.add("hidden");
+		} else {
+			document.getElementById("unified_badge").classList.add("hidden");
+			document.getElementById("vram_container").classList.remove("hidden");
+			var vram_p = (mem.vram_used_mb / mem.vram_total_mb) * 100;
+			document.getElementById("vram_text").innerText = mem.vram_used_mb.toFixed(0) + " / " + mem.vram_total_mb.toFixed(0) + " MB";
+			document.getElementById("vram_bar").style.width = vram_p + "%";
+		}
+
+		// Backend
+		var back = data.compute_backend;
+		document.getElementById("backend_api").innerText = back.active_api;
+		document.getElementById("backend_device").innerText = back.device_name;
+		if (back.npu_accelerated) {
+			document.getElementById("npu_badge").classList.remove("hidden");
+		} else {
+			document.getElementById("npu_badge").classList.add("hidden");
+		}
+
+		// Model
+		var mod = data.model_allocation;
+		document.getElementById("model_layers").innerText = mod.total_layers;
+		document.getElementById("model_offloaded").innerText = mod.offloaded_layers;
+
+		var bytes = mod.context_allocated_bytes;
+		var fmt_bytes = (bytes / (1024*1024)).toFixed(1) + " MB";
+		if (bytes > 1024*1024*1024) fmt_bytes = (bytes / (1024*1024*1024)).toFixed(2) + " GB";
+		document.getElementById("model_ctx_mem").innerText = fmt_bytes;
+
+		// Metrics
+		var met = data.metrics_realtime;
+		document.getElementById("metric_eval_ms").innerText = met.prompt_eval_time_ms.toFixed(1);
+		document.getElementById("metric_eval_speed").innerText = met.prompt_eval_speed_tps.toFixed(2);
+		document.getElementById("metric_gen_ms").innerText = met.generation_time_ms.toFixed(1);
+		document.getElementById("metric_gen_speed").innerText = met.generation_speed_tps.toFixed(2);
+		document.getElementById("metric_tokens").innerText = met.tokens_generated_current_turn;
+
+		// Graph
+		profiler_history.push({
+			t: Date.now(),
+			eval: met.prompt_eval_speed_tps,
+			gen: met.generation_speed_tps
+		});
+		if (profiler_history.length > 60) profiler_history.shift();
+		draw_profiler_chart();
+	}
+
+	function draw_profiler_chart() {
+		var canvas = document.getElementById("profiler_chart");
+		if(!canvas) return;
+		var ctx = canvas.getContext("2d");
+
+		var dpr = window.devicePixelRatio || 1;
+		var rect = canvas.getBoundingClientRect();
+		// Manually set size if 0
+		if (rect.width === 0) return;
+
+		canvas.width = rect.width * dpr;
+		canvas.height = rect.height * dpr;
+		ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // Reset scale
+		var w = rect.width;
+		var h = rect.height;
+
+		ctx.clearRect(0, 0, w, h);
+
+		if (profiler_history.length < 2) return;
+
+		var max_val = 10;
+		for(var i=0; i<profiler_history.length; i++) {
+			if(profiler_history[i].eval > max_val) max_val = profiler_history[i].eval;
+			if(profiler_history[i].gen > max_val) max_val = profiler_history[i].gen;
+		}
+		max_val = max_val * 1.1; // padding
+
+		// Eval (Green)
+		ctx.strokeStyle = "#28a745";
+		ctx.lineWidth = 2;
+		ctx.beginPath();
+		for(var i=0; i<profiler_history.length; i++) {
+			var x = (i / (profiler_history.length - 1)) * w;
+			var y = h - (profiler_history[i].eval / max_val) * h;
+			if(i==0) ctx.moveTo(x, y);
+			else ctx.lineTo(x, y);
+		}
+		ctx.stroke();
+
+		// Gen (Blue)
+		ctx.strokeStyle = "#17a2b8";
+		ctx.beginPath();
+		for(var i=0; i<profiler_history.length; i++) {
+			var x = (i / (profiler_history.length - 1)) * w;
+			var y = h - (profiler_history[i].gen / max_val) * h;
+			if(i==0) ctx.moveTo(x, y);
+			else ctx.lineTo(x, y);
+		}
+		ctx.stroke();
+	}
+
+	// Mobile Swipe to Delete
+	var touchStartX = 0;
+	var touchStartY = 0;
+	var touchCurrentElement = null;
+
+	document.addEventListener('touchstart', function(e) {
+		touchStartX = e.changedTouches[0].screenX;
+		touchStartY = e.changedTouches[0].screenY;
+		touchCurrentElement = e.target.closest('.chat_received_msg, .chat_sent_msg');
+	}, false);
+
+	document.addEventListener('touchend', function(e) {
+		if(!touchCurrentElement) return;
+		var touchEndX = e.changedTouches[0].screenX;
+		var touchEndY = e.changedTouches[0].screenY;
+
+		if (Math.abs(touchEndX - touchStartX) > 100 && Math.abs(touchEndY - touchStartY) < 50) {
+			if (touchEndX < touchStartX) { // Swipe Left
+				// Check if it is the last message
+				var all_msgs = document.querySelectorAll('.chat_received_msg, .chat_sent_msg');
+				if (all_msgs.length > 0 && all_msgs[all_msgs.length - 1].contains(touchCurrentElement) || all_msgs[all_msgs.length - 1] == touchCurrentElement) {
+					if(confirm("Undo last turn?")) {
+						btn_back();
+					}
+				}
+			}
+		}
+		touchCurrentElement = null;
+	}, false);
+
 	init();
 
 	//this is needed for PWA to work on chrome, so users can install KoboldAI Lite to device

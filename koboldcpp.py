@@ -41,6 +41,11 @@ import shutil
 import subprocess
 import gzip
 
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 # constants
 sampler_order_max = 7
 tensor_split_max = 16
@@ -4088,6 +4093,114 @@ Change Mode<br>
 
         elif clean_path.endswith(('/api/extra/true_max_context_length')): #do not advertise this to horde
             response_body = (json.dumps({"value": maxctx}).encode())
+
+        elif clean_path.endswith(('/api/extra/profiler')):
+            # Memory
+            ram_total = 0
+            ram_used = 0
+            if psutil:
+                try:
+                    vm = psutil.virtual_memory()
+                    ram_total = vm.total / (1024*1024)
+                    ram_used = (vm.total - vm.available) / (1024*1024)
+                except Exception:
+                    pass
+
+            vram_total = MaxMemory[0] / (1024*1024)
+            vram_used = (MaxMemory[0] - MaxFreeMemory[0]) / (1024*1024)
+
+            # Unified Memory Detection
+            unified = False
+            machine = platform.machine().lower()
+            sys_plat = sys.platform.lower()
+            if "arm" in machine or "aarch64" in machine:
+                if "darwin" in sys_plat: # Apple Silicon
+                    unified = True
+                elif "linux" in sys_plat and ("android" in os.environ.get("PREFIX", "") or os.path.exists('/system/app')): # Termux/Android
+                    unified = True
+
+            # Compute Backend
+            active_api = "CPU"
+            device_name = "CPU"
+            npu = False
+
+            if args.usevulkan is not None:
+                active_api = "Vulkan"
+                device_name = VKDevicesNames[0] if VKDevicesNames[0] else "Vulkan Device"
+                chk = device_name.lower()
+                if "npu" in chk or "neural" in chk or "ai engine" in chk:
+                    npu = True
+            elif args.usecuda is not None:
+                active_api = "CUDA"
+                device_name = CUDevicesNames[0] if CUDevicesNames[0] else "CUDA Device"
+            elif sys_plat == "darwin" and unified:
+                active_api = "Metal"
+                device_name = "Apple Silicon GPU"
+
+            # Metrics
+            lastp = handle.get_last_process_time()
+            laste = handle.get_last_eval_time()
+            lastc = handle.get_last_token_count()
+            lastic = handle.get_last_input_count()
+
+            prompt_ms = float(lastp) * float(lastic)
+            prompt_speed = 0
+            if lastp > 0:
+                prompt_speed = 1000.0 / lastp
+
+            gen_ms = float(laste) * float(lastc)
+            gen_speed = 0
+            if laste > 0:
+                gen_speed = 1000.0 / laste
+
+            # Model Allocation
+            t_layers = 0
+            off_layers = args.gpulayers
+            ctx_bytes = 0
+
+            if modelfile_extracted_meta and modelfile_extracted_meta[1]:
+                ggufmeta = modelfile_extracted_meta[1]
+                t_layers = ggufmeta[0]
+
+                # Estimate Context Bytes
+                layers = t_layers
+                heads = ggufmeta[1]
+                head_dim = ggufmeta[2]
+                if head_dim == 0: head_dim = 128
+
+                qkv = args.quantkv
+                size_mult = 2 # f16
+                if qkv == 1: size_mult = 1 # q8
+                elif qkv == 2: size_mult = 0.5 # q4
+
+                ctx_bytes = layers * maxctx * heads * head_dim * 2 * size_mult
+
+            response_body = json.dumps({
+                "system_memory": {
+                    "ram_total_mb": ram_total,
+                    "ram_used_mb": ram_used,
+                    "vram_total_mb": vram_total,
+                    "vram_used_mb": vram_used,
+                    "unified_memory": unified
+                },
+                "compute_backend": {
+                    "active_api": active_api,
+                    "device_name": device_name,
+                    "npu_accelerated": npu
+                },
+                "model_allocation": {
+                    "total_layers": t_layers,
+                    "offloaded_layers": off_layers,
+                    "context_allocated_bytes": int(ctx_bytes)
+                },
+                "metrics_realtime": {
+                    "prompt_eval_time_ms": prompt_ms,
+                    "prompt_eval_speed_tps": prompt_speed,
+                    "generation_time_ms": gen_ms,
+                    "generation_speed_tps": gen_speed,
+                    "tokens_generated_current_turn": lastc
+                }
+            }).encode()
 
         elif clean_path.endswith(('/api/extra/version')):
             caps = get_capabilities()
