@@ -3318,6 +3318,42 @@ def get_my_epurl():
         epurl = f"{httpsaffix}://{args.host}:{args.port}"
     return epurl
 
+def process_middleware(genparams):
+    if not args.middleware:
+        return genparams
+
+    mw_path = args.middleware
+    if not os.path.exists(mw_path):
+        print(f"Middleware script not found: {mw_path}")
+        return genparams
+
+    try:
+        cmd = [mw_path]
+        if mw_path.endswith(".py"):
+            cmd = [sys.executable, mw_path]
+
+        input_json = json.dumps(genparams)
+        result = subprocess.run(cmd, input=input_json, capture_output=True, text=True, check=True)
+
+        output_json = result.stdout
+        new_params = json.loads(output_json)
+        if isinstance(new_params, dict):
+            return new_params
+        else:
+            print("Middleware script returned invalid JSON (not a dict)")
+            return genparams
+
+    except subprocess.CalledProcessError as e:
+        print(f"Middleware execution failed: {e}")
+        print(f"Stderr: {e.stderr}")
+        return genparams
+    except json.JSONDecodeError as e:
+        print(f"Middleware returned invalid JSON: {e}")
+        return genparams
+    except Exception as e:
+        print(f"Middleware error: {e}")
+        return genparams
+
 #################################################################
 ### A hacky simple HTTP server simulating a kobold api by Concedo
 ### we are intentionally NOT using flask, because we want MINIMAL dependencies
@@ -3469,6 +3505,9 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
             print(f"Generate: Error while generating: {e}")
 
     async def send_oai_sse_event(self, data):
+        if getattr(self, "is_websocket", False):
+            self.send_websocket_frame(data)
+            return
         if data and data.strip()=="[DONE]":
             self.wfile.write(f'data: {data.strip()}\n\n'.encode())
         else:
@@ -3476,18 +3515,152 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.flush()
 
     async def send_kai_sse_event(self, data):
+        if getattr(self, "is_websocket", False):
+            self.send_websocket_frame(data)
+            return
         self.wfile.write('event: message\n'.encode())
         self.wfile.write(f'data: {data}\n\n'.encode())
         self.wfile.flush()
 
+    def handle_websocket_handshake(self):
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key:
+            return False
+
+        # Calculate Accept header
+        magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+        accept_key = base64.b64encode(hashlib.sha1((key + magic_string).encode()).digest()).decode()
+
+        self.send_response(101)
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept_key)
+        self.end_headers()
+        return True
+
+    def read_websocket_frame(self):
+        # Implementation of RFC 6455
+        try:
+            head1 = self.rfile.read(1)
+            if not head1: return None
+            b1 = ord(head1)
+            fin = b1 >> 7
+            opcode = b1 & 0x0F
+
+            head2 = self.rfile.read(1)
+            if not head2: return None
+            b2 = ord(head2)
+            masked = b2 >> 7
+            length = b2 & 0x7F
+
+            if length == 126:
+                length_bytes = self.rfile.read(2)
+                length = struct.unpack("!H", length_bytes)[0]
+            elif length == 127:
+                length_bytes = self.rfile.read(8)
+                length = struct.unpack("!Q", length_bytes)[0]
+
+            mask_key = None
+            if masked:
+                mask_key = self.rfile.read(4)
+
+            payload = self.rfile.read(length)
+
+            if masked:
+                # Unmask
+                unmasked = bytearray(length)
+                for i in range(length):
+                    unmasked[i] = payload[i] ^ mask_key[i % 4]
+                payload = unmasked
+
+            return {"fin": fin, "opcode": opcode, "payload": payload}
+        except Exception:
+            return None
+
+    def send_websocket_frame(self, data, opcode=0x1):
+        # 0x1 = text, 0x8 = close
+        try:
+            if isinstance(data, str):
+                data = data.encode('utf-8')
+
+            length = len(data)
+            header = bytearray()
+
+            b1 = 0x80 | opcode # FIN + opcode
+            header.append(b1)
+
+            if length <= 125:
+                header.append(length)
+            elif length <= 65535:
+                header.append(126)
+                header.extend(struct.pack("!H", length))
+            else:
+                header.append(127)
+                header.extend(struct.pack("!Q", length))
+
+            self.wfile.write(header)
+            self.wfile.write(data)
+            self.wfile.flush()
+        except Exception:
+            pass
+
+    def handle_websocket_session(self):
+        if not self.handle_websocket_handshake():
+            self.send_error(400, "Bad Request")
+            return
+
+        self.is_websocket = True
+
+        # Keep connection alive
+        try:
+            while True:
+                frame = self.read_websocket_frame()
+                if not frame:
+                    break
+
+                opcode = frame["opcode"]
+                if opcode == 0x8: # Close
+                    break
+                elif opcode == 0x9: # Ping
+                    self.send_websocket_frame(frame["payload"], 0xA) # Pong
+                    continue
+                elif opcode == 0x1: # Text
+                    # Parse genparams
+                    try:
+                        body = frame["payload"]
+                        genparams = json.loads(body)
+                        genparams = process_middleware(genparams)
+
+                        # Determine API format based on path (simplified)
+                        api_format = 2 # default to kai
+                        if self.path.endswith(('/api/v1/generate', '/api/latest/generate')):
+                            api_format = 2
+                        elif self.path.endswith(('/v1/chat/completions', '/chat/completions')):
+                            api_format = 4
+                        elif self.path.endswith(('/v1/completions', '/completions')):
+                            api_format = 3
+
+                        # Handle request (async)
+                        asyncio.run(self.handle_request(genparams, api_format, stream_flag=True))
+
+                    except Exception as e:
+                        utfprint(f"WebSocket Error: {e}")
+                        self.send_websocket_frame(json.dumps({"error": str(e)}))
+
+        except Exception as e:
+            print(f"WebSocket Session Error: {e}")
+        finally:
+            self.is_websocket = False
+
     async def handle_sse_stream(self, genparams, api_format):
         global friendlymodelname, currfinishreason
         using_openai_tools = genparams.get('using_openai_tools', False)
-        self.send_response(200)
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_header("cache-control", "no-cache")
-        self.send_header("connection", "keep-alive")
-        self.end_headers(content_type='text/event-stream')
+        if not getattr(self, "is_websocket", False):
+            self.send_response(200)
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("cache-control", "no-cache")
+            self.send_header("connection", "keep-alive")
+            self.end_headers(content_type='text/event-stream')
         if api_format == 4 and using_openai_tools: # if tools, do not send anything else - OAI tool calls will be handled with fakestreaming!
             return
 
@@ -3851,6 +4024,10 @@ Change Mode<br>
         global embedded_kailite, embedded_kcpp_docs, embedded_kcpp_sdui, embedded_kailite_gz, embedded_kcpp_docs_gz, embedded_kcpp_sdui_gz, embedded_lcpp_ui_gz
         global last_req_time, start_time, cached_chat_template, has_vision_support, has_audio_support, has_whisper, friendlymodelname
         global savedata_obj, has_multiplayer, multiplayer_turn_major, multiplayer_turn_minor, multiplayer_story_data_compressed, multiplayer_dataformat, multiplayer_lastactive, maxctx, maxhordelen, friendlymodelname, lastuploadedcomfyimg, lastgeneratedcomfyimg, KcppVersion, totalgens, preloaded_story, exitcounter, currentusergenkey, friendlysdmodelname, fullsdmodelpath, password, friendlyembeddingsmodelname
+
+        if self.headers.get('Upgrade', '').lower() == 'websocket':
+             self.handle_websocket_session()
+             return
 
         clean_path = self.path.split("?")[0] #for cases where we do not want query params
         if clean_path=="/lcpp": #fix for svelte redirect issues, browser path needs to end with slash
@@ -4772,6 +4949,7 @@ Change Mode<br>
                 genparams = None
                 try:
                     genparams = json.loads(body)
+                    genparams = process_middleware(genparams)
                 except Exception:
                     genparams = None
                     if is_transcribe: #fallback handling of file uploads
@@ -9000,6 +9178,7 @@ if __name__ == '__main__':
     advparser.add_argument("--device", "-dev", metavar=('<dev1,dev2,..>'), help="Set llama.cpp compatible device selection override. Comma separated. Overrides normal device choices.", default="")
     advparser.add_argument("--downloaddir", metavar=('[directory]'), help="Specify a directory that models will be downloaded to or searched from, if unset uses the working directory.", default="")
     advparser.add_argument("--autofitpadding", metavar=('[padding in MB]'), help="How much spare allowance in MB should autofit reserve? If it's too little, the load might fail.", type=int, default=default_autofit_padding)
+    advparser.add_argument("--middleware", metavar=('[filepath]'), help="Path to a Python script that will intercept and modify JSON requests for text generation.", default="")
 
     hordeparsergroup = parser.add_argument_group('Horde Worker Commands')
     hordeparsergroup.add_argument("--hordemodelname", metavar=('[name]'), help="Sets your AI Horde display model name.", default="")
