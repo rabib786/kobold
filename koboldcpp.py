@@ -580,9 +580,9 @@ class StdoutRedirector:
                 try:
                     self.writer.write(message)
                     self.writer.flush()
-                except Exception:
+                except (OSError, ValueError):
                     self.writer = None
-        except Exception:
+        except (OSError, ValueError):
             pass
     def flush(self):
         self.terminal.flush()
