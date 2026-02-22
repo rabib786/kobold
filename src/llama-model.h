@@ -7,6 +7,8 @@
 #include "llama-memory.h"
 #include "llama-vocab.h"
 
+#include <functional>
+#include <initializer_list>
 #include <map>
 #include <memory>
 #include <string>
@@ -560,6 +562,8 @@ struct llama_model {
     ggml_cgraph * build_graph(const llm_graph_params & params) const;
 
 private:
+    void init_arch_tensors(llama_model_loader & ml, ggml_context *& last_used_ctx, bool & use_mmap_buffer, const std::function<ggml_tensor*(const LLM_TN_IMPL &, const std::initializer_list<int64_t> &, int)> & create_tensor);
+
     llama_model_params params;
 
     struct impl;
