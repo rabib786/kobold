@@ -4210,6 +4210,198 @@ Current version indicated by LITEVER below.
 	var anote_strength = 320; //distance from end
 	var newlineaftermemory = true;
 	var current_wi = []; //each item stores a wi object.
+	var current_characters = []; // { name: "", description: "", active: true }
+	var scenario_settings = { global_note: "" };
+
+	function display_world_popup() {
+		hide_popups();
+		document.getElementById("worldpopupcontainer").classList.remove("hidden");
+		display_world_tab(0);
+	}
+
+	function display_world_tab(idx) {
+		const tabs = ["world_tab_scenario", "world_tab_characters", "world_tab_memorycards"];
+		for (let i = 0; i < tabs.length; i++) {
+			document.getElementById(tabs[i]).classList.add("hidden");
+			document.getElementById("worldtabs").children[i].classList.remove("active");
+		}
+		document.getElementById(tabs[idx]).classList.remove("hidden");
+		document.getElementById("worldtabs").children[idx].classList.add("active");
+
+		if (idx === 0) {
+			document.getElementById("world_global_note").value = scenario_settings.global_note || "";
+		} else if (idx === 1) {
+			render_character_list();
+		} else if (idx === 2) {
+			render_memory_cards();
+		}
+	}
+
+	function update_world_settings() {
+		scenario_settings.global_note = document.getElementById("world_global_note").value;
+	}
+
+	function render_character_list() {
+		let container = document.getElementById("character_list");
+		container.innerHTML = "";
+
+		for (let i = 0; i < current_characters.length; i++) {
+			let char = current_characters[i];
+			let div = document.createElement("div");
+			div.className = "settingsbox flex";
+			div.style.marginBottom = "5px";
+
+			let nameInput = `<input type="text" class="settinglabel miniinput" style="width: 150px; font-weight: bold;" value="${escape_html(char.name)}" onchange="update_character(${i}, 'name', this.value)">`;
+			let activeCheckbox = `<input type="checkbox" ${char.active ? "checked" : ""} onchange="update_character(${i}, 'active', this.checked)">`;
+			let deleteBtn = `<button class="btn btn-primary bg_red" style="padding: 2px 5px; margin-left: 5px;" onclick="delete_character(${i})">Del</button>`;
+			let editBtn = `<button class="btn btn-primary" style="padding: 2px 5px; margin-left: 5px;" onclick="edit_character_desc(${i})">Edit</button>`;
+
+			div.innerHTML = `
+				<div style="display:flex; align-items:center; width:100%;">
+					<div style="margin-right: 5px;">Active: ${activeCheckbox}</div>
+					${nameInput}
+					<div class="push-right">
+						${editBtn}
+						${deleteBtn}
+					</div>
+				</div>
+				<div class="menutext" style="text-align:left; font-size: 11px; color: gray; width:100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+					${escape_html(char.description).substring(0, 100)}
+				</div>
+			`;
+			container.appendChild(div);
+		}
+	}
+
+	function add_new_character() {
+		current_characters.push({ name: "New Character", description: "", active: true });
+		render_character_list();
+	}
+
+	function update_character(idx, field, value) {
+		if (current_characters[idx]) {
+			current_characters[idx][field] = value;
+		}
+	}
+
+	function delete_character(idx) {
+		if (confirm("Delete character?")) {
+			current_characters.splice(idx, 1);
+			render_character_list();
+		}
+	}
+
+	function edit_character_desc(idx) {
+		let char = current_characters[idx];
+		inputBoxOkCancel(char.description, "Edit Description for " + char.name, (val) => {
+			char.description = val;
+			render_character_list();
+		}, "Description");
+	}
+
+	function get_active_characters_prompt() {
+		let prompt = "";
+		for (let i = 0; i < current_characters.length; i++) {
+			if (current_characters[i].active) {
+				if (current_characters[i].description && current_characters[i].description.trim() !== "") {
+					prompt += current_characters[i].description.trim() + "\n\n";
+				}
+			}
+		}
+		if (scenario_settings.global_note && scenario_settings.global_note.trim() !== "") {
+			prompt += "[Scenario Note: " + scenario_settings.global_note.trim() + "]\n\n";
+		}
+		return prompt;
+	}
+
+	function render_memory_cards() {
+		let container = document.getElementById("memory_card_list");
+		container.innerHTML = "";
+		let filter = document.getElementById("memory_card_filter").value.toLowerCase();
+
+		for (let i = 0; i < current_wi.length; i++) {
+			let wi = current_wi[i];
+			// Only show if it's a "Memory Card" (we can use a specific wigroup or just treat all as editable)
+			// For now, let's treat all WI as potential memory cards, but maybe filter by a tag if implemented.
+			// Or just filter by search text.
+
+			if (filter && !wi.key.toLowerCase().includes(filter) && !wi.content.toLowerCase().includes(filter)) {
+				continue;
+			}
+
+			let div = document.createElement("div");
+			div.className = "settingsbox flex";
+			div.style.marginBottom = "5px";
+			div.style.padding = "5px";
+
+			div.innerHTML = `
+				<div style="width:100%; display:flex; justify-content:space-between; align-items:center;">
+					<b style="font-size:12px;">${escape_html(wi.key)}</b>
+					<button class="btn btn-primary" style="padding: 2px 5px;" onclick="quick_edit_wi(${i})">Update</button>
+				</div>
+				<div class="menutext" style="text-align:left; font-size: 11px; color: gray; width:100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+					${escape_html(wi.content).substring(0, 100)}
+				</div>
+			`;
+			container.appendChild(div);
+		}
+	}
+
+	function add_memory_card() {
+		// Just adds a new WI entry and opens edit
+		let nwi = {
+			"key": "New Card",
+			"keysecondary": "",
+			"keyanti": "",
+			"content": "",
+			"comment": "",
+			"folder": null,
+			"selective": false,
+			"constant": false,
+			"probability":100,
+			"wigroup":"Memory Cards",
+			"widisabled":false
+		};
+		current_wi.push(nwi);
+		render_memory_cards();
+		quick_edit_wi(current_wi.length - 1);
+	}
+
+	function quick_edit_wi(idx) {
+		let wi = current_wi[idx];
+		// Use inputBoxOkCancel but maybe with a larger area or append mode
+		// The user wants "Persistent State Tracking: A way to update these cards mid-session (e.g., if a character learns a new piece of information, it is saved to their specific Memory Card rather than just drifting up the chat history)."
+
+		let content = `
+			<div class="menutext">Key: <input class="form-control" style="display:inline; width: 60%" value="${escape_html(wi.key)}" id="qe_wi_key"></div>
+			<textarea class="form-control menuinput_multiline" style="height: 200px;" id="qe_wi_content">${escape_html(wi.content)}</textarea>
+			<div style="margin-top: 5px;">
+				<input type="text" class="form-control" style="display:inline; width: 70%;" placeholder="Append text..." id="qe_wi_append">
+				<button class="btn btn-primary" onclick="append_wi_text()">Append</button>
+			</div>
+		`;
+
+		msgboxYesNo(content, "Edit Memory Card", () => {
+			let newKey = document.getElementById("qe_wi_key").value;
+			let newContent = document.getElementById("qe_wi_content").value;
+			wi.key = newKey;
+			wi.content = newContent;
+			render_memory_cards();
+		}, null, true);
+
+		// Add helper to append text immediately without closing (simulated)
+		// Since msgboxYesNo replaces innerHTML, I can attach function to window for now or inline it.
+		// Wait, `msgboxYesNo` content is HTML string. I can't easily bind `onclick` to a local function unless I expose it.
+
+		window.append_wi_text = function() {
+			let appendText = document.getElementById("qe_wi_append").value;
+			if (appendText) {
+				let textarea = document.getElementById("qe_wi_content");
+				textarea.value += "\n" + appendText;
+				document.getElementById("qe_wi_append").value = "";
+			}
+		};
+	}
 	var wi_insertlocation = 0; //after memory
 	var wi_searchdepth = 0; //search everything
 	var documentdb_provider = 0; //0 = disables, 1 = textdb, 2 = kcpp, 3 = openai embeddings
@@ -9774,6 +9966,8 @@ Current version indicated by LITEVER below.
 		new_save_storyobj.authorsnote = current_anote;
 		new_save_storyobj.memory = current_memory;
 		new_save_storyobj.worldinfo = current_wi;
+		new_save_storyobj.characters = current_characters;
+		new_save_storyobj.scenario_settings = scenario_settings;
 
 		//extra unofficial fields for the story
 		new_save_storyobj.anotestr = anote_strength;
@@ -10011,6 +10205,8 @@ Current version indicated by LITEVER below.
 			let old_current_anotetemplate = current_anotetemplate;
 			let old_current_memory = current_memory;
 			let old_current_wi = current_wi;
+			let old_current_characters = current_characters;
+			let old_scenario_settings = scenario_settings;
 			let old_notes = personal_notes;
 			let old_newlineaftermemory = newlineaftermemory;
 
@@ -10203,6 +10399,12 @@ Current version indicated by LITEVER below.
 						}
 					}
 				}
+				if (storyobj.characters) {
+					current_characters = storyobj.characters;
+				}
+				if (storyobj.scenario_settings) {
+					scenario_settings = storyobj.scenario_settings;
+				}
 			}
 
 			const import_settings = function(loadmainstory,loadmemanote,loadworldinfo,loadstopseq,loadgensettings,loadaessettings)
@@ -10223,6 +10425,8 @@ Current version indicated by LITEVER below.
 				if(!loadworldinfo)
 				{
 					current_wi = old_current_wi;
+					current_characters = old_current_characters;
+					scenario_settings = old_scenario_settings;
 				}
 
 				if (storyobj.savedsettings && storyobj.savedsettings != "")
@@ -19937,6 +20141,7 @@ Current version indicated by LITEVER below.
 			}
 
 			truncated_memory = appendedsysprompt + truncate_memory(truncated_memory, max_mem_len, true);
+			truncated_memory += "\n" + get_active_characters_prompt();
 
 			//now we resize the context such that the memory and authors note can fit inside
 			truncated_context = substring_to_boundary(truncated_context, max_allowed_characters);
@@ -28352,6 +28557,10 @@ Current version indicated by LITEVER below.
 							<a class="nav-link mainnav" href="#" onclick="closeTopNav();display_endpoint_container()">Select Endpoint</a>
 						</li>
 
+						<li class="nav-item" id="topbtn_world">
+							<a class="nav-link mainnav" href="#" onclick="closeTopNav();display_world_popup()">World</a>
+						</li>
+
 						<li class="nav-item hidden" id="topbtn_ai">
 							<a class="nav-link mainnav" href="#" onclick="closeTopNav();display_endpoint_container()">AI</a>
 						</li>
@@ -31388,6 +31597,60 @@ Current version indicated by LITEVER below.
 			<div class="popupfooter">
 				<button type="button" class="btn btn-primary" onclick="confirm_groupchat_select()">Ok</button>
 				<button type="button" class="btn btn-primary" onclick="hide_popups()">Cancel</button>
+			</div>
+		</div>
+	</div>
+
+	<div class="popupcontainer flex hidden" id="worldpopupcontainer">
+		<div class="popupbg flex"></div>
+		<div class="nspopup flexsize highest">
+			<div class="popuptitlebar">
+				<div class="popuptitletext">Scenario / World Manager</div>
+			</div>
+			<ul class="nav nav-tabs settingsnav" id="worldtabs">
+				<li class="active"><a href="#" onclick="display_world_tab(0)">Scenario</a></li>
+				<li><a href="#" onclick="display_world_tab(1)">Characters</a></li>
+				<li><a href="#" onclick="display_world_tab(2)">Memory Cards</a></li>
+			</ul>
+			<div class="settingsbody" style="height: calc(80vh - 140px); overflow-y: auto;">
+				<!-- Scenario Tab -->
+				<div id="world_tab_scenario" class="settingsmenu">
+					<div class="menutext">
+						<p>Global Scenario Settings</p>
+						<div class="settinglabel">
+							<div class="justifyleft">Global Note (Author's Note)</div>
+							<textarea class="form-control menuinput_multiline" rows="4" id="world_global_note" onchange="update_world_settings()"></textarea>
+						</div>
+					</div>
+				</div>
+
+				<!-- Characters Tab -->
+				<div id="world_tab_characters" class="settingsmenu hidden">
+					<div class="settingitem wide">
+						<button class="btn btn-primary" onclick="add_new_character()">Add Character</button>
+						<div id="character_list" style="margin-top: 10px;">
+							<!-- Character items will be injected here -->
+						</div>
+					</div>
+				</div>
+
+				<!-- Memory Cards Tab -->
+				<div id="world_tab_memorycards" class="settingsmenu hidden">
+					<div class="settingitem wide">
+						<p>Memory Cards (Persistent World Info)</p>
+						<div class="settinglabel">
+							<div class="justifyleft">Filter</div>
+							<input class="form-control" type="text" id="memory_card_filter" oninput="render_memory_cards()" placeholder="Search...">
+						</div>
+						<button class="btn btn-primary" onclick="add_memory_card()">Add New Card</button>
+						<div id="memory_card_list" style="margin-top: 10px;">
+							<!-- Memory Cards will be injected here -->
+						</div>
+					</div>
+				</div>
+			</div>
+			<div class="popupfooter">
+				<button type="button" class="btn btn-primary" onclick="hide_popups()">Close</button>
 			</div>
 		</div>
 	</div>
