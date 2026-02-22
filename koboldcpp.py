@@ -17,6 +17,7 @@ import copy
 import ctypes
 import multiprocessing
 import math
+import glob
 import re
 import argparse
 import platform
@@ -430,6 +431,91 @@ class embeddings_generation_outputs(ctypes.Structure):
     _fields_ = [("status", ctypes.c_int),
                 ("count", ctypes.c_int),
                 ("data", ctypes.c_char_p)]
+
+class HardwareMonitor:
+    def __init__(self):
+        self.battery_cost_per_token = 0.0
+        self.last_battery_level = -1
+        self.last_token_update_time = time.time()
+        self.accumulated_tokens = 0
+        self.accumulated_drain = 0
+        self.critical_temp_threshold = 85 # degrees C
+        self.is_throttling = False
+        self.pending_layer_reduction = False
+        self.warning_message = ""
+
+    def get_temperature(self):
+        max_temp = 0
+        try:
+            if os.path.exists("/sys/class/thermal"):
+                # iterate zones
+                for zone in glob.glob("/sys/class/thermal/thermal_zone*"):
+                    try:
+                        temp_file = os.path.join(zone, "temp")
+                        if os.path.exists(temp_file):
+                            with open(temp_file, 'r') as f:
+                                temp_str = f.read().strip()
+                                if temp_str:
+                                    temp = int(temp_str) / 1000.0
+                                    if temp > max_temp and temp < 150: # filter crazy values
+                                        max_temp = temp
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return max_temp
+
+    def get_battery_level(self):
+        level = -1
+        try:
+            # try standard capacity file
+            paths = ["/sys/class/power_supply/battery/capacity", "/sys/class/power_supply/BAT0/capacity"]
+            for p in paths:
+                if os.path.exists(p):
+                    with open(p, 'r') as f:
+                        level = int(f.read().strip())
+                    break
+        except Exception:
+            pass
+        return level
+
+    def update_drain(self, new_tokens):
+        current_level = self.get_battery_level()
+        if self.last_battery_level == -1:
+            self.last_battery_level = current_level
+            return
+
+        if current_level != -1 and current_level <= self.last_battery_level:
+            diff = self.last_battery_level - current_level
+            # Only accumulate if we actually drained something or generated tokens
+            # We want to avoid noise, but over long runs 1% drain is significant
+            if diff > 0 or new_tokens > 0:
+                self.accumulated_drain += diff
+                self.accumulated_tokens += new_tokens
+
+            if self.accumulated_tokens > 0:
+                self.battery_cost_per_token = self.accumulated_drain / self.accumulated_tokens
+
+            self.last_battery_level = current_level
+        elif current_level > self.last_battery_level:
+            # charging? reset
+            self.last_battery_level = current_level
+            self.accumulated_drain = 0
+            self.accumulated_tokens = 0
+
+    def check_thermals(self):
+        temp = self.get_temperature()
+        if temp > self.critical_temp_threshold:
+            self.is_throttling = True
+            self.pending_layer_reduction = True
+            self.warning_message = f"Warning: Device temperature critical ({temp:.1f}°C)! Offload scaling triggered."
+            return True, temp
+        else:
+            self.is_throttling = False
+            self.warning_message = ""
+        return False, temp
+
+hardware_monitor = HardwareMonitor()
 
 class StdoutRedirector:
     def __init__(self, writer):
@@ -1892,6 +1978,15 @@ def generate(genparams, stream_flag=False):
                 sindex = outstr.find(trim_str)
                 if sindex != -1 and trim_str!="":
                     outstr = outstr[:sindex]
+
+        # update hardware monitor
+        try:
+            if hardware_monitor:
+                hardware_monitor.update_drain(ret.completion_tokens)
+                hardware_monitor.check_thermals()
+        except Exception:
+            pass
+
         return {"text":outstr,"status":ret.status,"stopreason":ret.stopreason,"prompt_tokens":ret.prompt_tokens, "completion_tokens": ret.completion_tokens}
 
 def sd_get_info():
@@ -3971,6 +4066,29 @@ Change Mode<br>
                 }
             ).encode()
 
+        elif clean_path.endswith('/api/extra/hardware_status'):
+            if not self.secure_endpoint():
+                return
+            temp = 0
+            batt = -1
+            drain = 0.0
+            throttling = False
+            msg = ""
+            if hardware_monitor:
+                temp = hardware_monitor.get_temperature()
+                batt = hardware_monitor.get_battery_level()
+                drain = hardware_monitor.battery_cost_per_token
+                throttling = hardware_monitor.is_throttling
+                msg = hardware_monitor.warning_message
+
+            response_body = json.dumps({
+                "temperature": temp,
+                "battery_level": batt,
+                "drain_per_token": drain,
+                "throttling": throttling,
+                "warning": msg
+            }).encode()
+
         elif clean_path.endswith('/api/extra/generate/check'):
             if not self.secure_endpoint():
                 return
@@ -4637,6 +4755,26 @@ Change Mode<br>
         if muint > 0 and requestsinqueue < multiuserlimit:
             reqblocking = True
             requestsinqueue += 1
+
+        # Check dynamic scaling before acquiring lock for generation
+        if hardware_monitor and hardware_monitor.pending_layer_reduction:
+             # Try to acquire lock to perform reload (blocking)
+             if modelbusy.acquire(blocking=True):
+                 try:
+                     if hardware_monitor.pending_layer_reduction: # check again
+                         # PERFORM RELOAD
+                         print("Performing Dynamic Offload Scaling due to thermals...")
+                         new_layers = max(0, args.gpulayers - 5) # reduce by 5 layers
+                         if new_layers < args.gpulayers:
+                             args.gpulayers = new_layers
+                             load_model(args.model_param)
+                             print(f"Model reloaded with {new_layers} layers.")
+                         hardware_monitor.pending_layer_reduction = False
+                 except Exception as e:
+                     print(f"Dynamic Scaling Failed: {e}")
+                 finally:
+                     modelbusy.release()
+
         if not modelbusy.acquire(blocking=reqblocking):
             self.send_response(503)
             self.end_headers(content_type='application/json')
@@ -8664,6 +8802,43 @@ def kcpp_main_process(launch_args, g_memory=None, gui_launcher=False):
             patches = [{"find":"Sorry, KoboldAI Lite requires Javascript to function.","replace":"Sorry, KoboldAI Lite requires Javascript to function.<br>You can use <a class=\"color_blueurl\" href=\"/noscript\">KoboldCpp NoScript mode</a> instead."},
                        {"find":"var localflag = urlParams.get('local');","replace":"var localflag = true;"},
                        {"find":"<p id=\"tempgtloadtxt\">Loading...</p>","replace":"<p id=\"tempgtloadtxt\">Loading...<br>(If load fails, try <a class=\"color_blueurl\" href=\"/noscript\">KoboldCpp NoScript mode</a> instead, or adding /noscript at this url.)</p>"}]
+
+            widget_code = """
+<div id="hw-monitor" style="position:fixed;bottom:5px;right:5px;background:rgba(0,0,0,0.8);color:#eee;padding:8px;border-radius:8px;font-size:11px;z-index:99999;pointer-events:none;font-family:sans-serif;border:1px solid #444;display:none;">
+  <div style="margin-bottom:2px;">🌡️ <span id="hw-temp">--</span>°C</div>
+  <div>🔋 <span id="hw-batt">--</span>% <span style="opacity:0.7;">(<span id="hw-drain">--</span>%/T)</span></div>
+  <div id="hw-warn" style="color:#ff4444;margin-top:4px;font-weight:bold;display:none;animation:blink 1s infinite;">⚠️ THROTTLING</div>
+  <style>@keyframes blink{50%{opacity:0.5;}}</style>
+</div>
+<script>
+(function(){
+    setInterval(async ()=>{
+      try {
+        const r = await fetch('/api/extra/hardware_status', {method: 'POST'});
+        if(r.ok){
+            const d = await r.json();
+            const w = document.getElementById('hw-monitor');
+            if(d.temperature > 0 || d.battery_level >= 0) {
+                w.style.display = 'block';
+                document.getElementById('hw-temp').innerText = d.temperature.toFixed(1);
+                document.getElementById('hw-batt').innerText = d.battery_level > -1 ? d.battery_level : '--';
+                document.getElementById('hw-drain').innerText = d.drain_per_token > 0 ? (d.drain_per_token).toFixed(4) : '--';
+                const warn = document.getElementById('hw-warn');
+                if(d.throttling || d.warning) {
+                    warn.style.display = 'block';
+                    warn.innerText = d.warning || "THROTTLING DETECTED";
+                } else {
+                    warn.style.display = 'none';
+                }
+            }
+        }
+      } catch(e){}
+    }, 5000);
+})();
+</script>
+</body>
+"""
+            patches.append({"find":"</body>","replace":widget_code})
             embedded_kailite = embedded_kailite.decode("UTF-8","ignore")
             for p in patches:
                 embedded_kailite = embedded_kailite.replace(p["find"], p["replace"])
