@@ -1386,65 +1386,73 @@ def autoset_gpu_layers(ctxsize, sdquanted, bbs, qkv_level): #shitty algo to dete
     except Exception:
         return 0
 
+def run_subprocess(command, timeout=10, **kwargs):
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=True, encoding='utf-8', timeout=timeout, **kwargs).stdout
+    except Exception:
+        return ""
+
 def detect_memory_cu(gpumem_ignore_limit_min, gpumem_ignore_limit_max):
         FetchedCUdevices = []
         FetchedCUdeviceMem = []
         FetchedCUfreeMem = []
 
         AMDgpu = None
-        try: # Get NVIDIA GPU names
-            output = subprocess.run(['nvidia-smi','--query-gpu=name,memory.total,memory.free','--format=csv,noheader'], capture_output=True, text=True, check=True, encoding='utf-8', timeout=10).stdout
-            FetchedCUdevices = [line.split(",")[0].strip() for line in output.splitlines()]
-            FetchedCUdeviceMem = [line.split(",")[1].strip().split(" ")[0].strip() for line in output.splitlines()]
-            FetchedCUfreeMem = [line.split(",")[2].strip().split(" ")[0].strip() for line in output.splitlines()]
-        except Exception:
-            FetchedCUdeviceMem = []
-            FetchedCUfreeMem = []
-            pass
-        if len(FetchedCUdevices)==0:
-            try: # Get AMD ROCm GPU names and VRAM from rocminfo
-                output = subprocess.run(['rocminfo'], capture_output=True, text=True, check=True, encoding='utf-8', timeout=10).stdout
-                device_name = None
-                current_agent_is_gpu = False
-                in_pool_section = False
-
-                for line in output.splitlines(): # read through the output line by line
-                    line = line.strip()
-                    if line.startswith("Agent ") and "Agent" in line:
-                        # Reset state for new agent
-                        device_name = None
-                        current_agent_is_gpu = False
-                        in_pool_section = False
-                    elif line.startswith("Marketing Name:"):
-                        device_name = line.split(":", 1)[1].strip() # if we find a named device, temporarily save the name
-                    elif line.startswith("Device Type:") and "GPU" in line and device_name is not None:
-                        # if the following Device Type is a GPU (not a CPU) then add it to devices list
-                        FetchedCUdevices.append(device_name)
-                        current_agent_is_gpu = True
-                        AMDgpu = True
-                    elif line.startswith("Device Type:") and "GPU" not in line:
-                        device_name = None
-                        current_agent_is_gpu = False
-                    elif line.startswith("Pool Info:") and current_agent_is_gpu:
-                        in_pool_section = True
-                    elif in_pool_section and current_agent_is_gpu and line.startswith("Segment:") and "GLOBAL" in line and "COARSE GRAINED" in line:
-                        # This is the main VRAM pool for this GPU
-                        continue
-                    elif in_pool_section and current_agent_is_gpu and line.startswith("Size:"):
-                        # Extract VRAM size in KB and convert to MB
-                        size_match = re.search(r'(\d+)\(0x[0-9a-fA-F]+\)\s*KB', line)
-                        if size_match:
-                            vram_kb = int(size_match.group(1))
-                            vram_mb = vram_kb // 1024
-                            FetchedCUdeviceMem.append(str(vram_mb))
-                            in_pool_section = False
-
-                if FetchedCUdevices and FetchedCUdeviceMem:
-                    print(f"Detected AMD GPU VRAM from rocminfo: {list(zip(FetchedCUdevices, FetchedCUdeviceMem))} MB")
+        output = run_subprocess(['nvidia-smi','--query-gpu=name,memory.total,memory.free','--format=csv,noheader'])
+        if output: # Get NVIDIA GPU names
+            try:
+                FetchedCUdevices = [line.split(",")[0].strip() for line in output.splitlines()]
+                FetchedCUdeviceMem = [line.split(",")[1].strip().split(" ")[0].strip() for line in output.splitlines()]
+                FetchedCUfreeMem = [line.split(",")[2].strip().split(" ")[0].strip() for line in output.splitlines()]
             except Exception:
                 FetchedCUdeviceMem = []
                 FetchedCUfreeMem = []
-                pass
+
+        if len(FetchedCUdevices)==0:
+            output = run_subprocess(['rocminfo'])
+            if output: # Get AMD ROCm GPU names and VRAM from rocminfo
+                try:
+                    device_name = None
+                    current_agent_is_gpu = False
+                    in_pool_section = False
+
+                    for line in output.splitlines(): # read through the output line by line
+                        line = line.strip()
+                        if line.startswith("Agent ") and "Agent" in line:
+                            # Reset state for new agent
+                            device_name = None
+                            current_agent_is_gpu = False
+                            in_pool_section = False
+                        elif line.startswith("Marketing Name:"):
+                            device_name = line.split(":", 1)[1].strip() # if we find a named device, temporarily save the name
+                        elif line.startswith("Device Type:") and "GPU" in line and device_name is not None:
+                            # if the following Device Type is a GPU (not a CPU) then add it to devices list
+                            FetchedCUdevices.append(device_name)
+                            current_agent_is_gpu = True
+                            AMDgpu = True
+                        elif line.startswith("Device Type:") and "GPU" not in line:
+                            device_name = None
+                            current_agent_is_gpu = False
+                        elif line.startswith("Pool Info:") and current_agent_is_gpu:
+                            in_pool_section = True
+                        elif in_pool_section and current_agent_is_gpu and line.startswith("Segment:") and "GLOBAL" in line and "COARSE GRAINED" in line:
+                            # This is the main VRAM pool for this GPU
+                            continue
+                        elif in_pool_section and current_agent_is_gpu and line.startswith("Size:"):
+                            # Extract VRAM size in KB and convert to MB
+                            size_match = re.search(r'(\d+)\(0x[0-9a-fA-F]+\)\s*KB', line)
+                            if size_match:
+                                vram_kb = int(size_match.group(1))
+                                vram_mb = vram_kb // 1024
+                                FetchedCUdeviceMem.append(str(vram_mb))
+                                in_pool_section = False
+
+                    if FetchedCUdevices and FetchedCUdeviceMem:
+                        print(f"Detected AMD GPU VRAM from rocminfo: {list(zip(FetchedCUdevices, FetchedCUdeviceMem))} MB")
+                except Exception:
+                    FetchedCUdeviceMem = []
+                    FetchedCUfreeMem = []
+                    pass
         lowestcumem = 0
         lowestfreecumem = 0
         try:
@@ -1471,7 +1479,7 @@ def detect_memory_vk(gpumem_ignore_limit_min, gpumem_ignore_limit_max):
         try: # Get Vulkan names
             foundVkGPU = False
             lowestvkmem = 0
-            output = subprocess.run(['vulkaninfo','--summary'], capture_output=True, text=True, check=True, encoding='utf-8', timeout=10).stdout
+            output = run_subprocess(['vulkaninfo','--summary'])
             devicelist = [line.split("=")[1].strip() for line in output.splitlines() if "deviceName" in line]
             devicetypes = [line.split("=")[1].strip() for line in output.splitlines() if "deviceType" in line]
             idx = 0
@@ -1490,22 +1498,23 @@ def detect_memory_vk(gpumem_ignore_limit_min, gpumem_ignore_limit_max):
                         idx += 1
 
             if foundVkGPU:
-                try: # Try get vulkan memory (experimental)
-                    output = subprocess.run(['vulkaninfo'], capture_output=True, text=True, check=True, encoding='utf-8', timeout=10).stdout
-                    devicechunks = output.split("VkPhysicalDeviceMemoryProperties")[1:]
-                    gpuidx = 0
-                    for chunk in devicechunks:
-                        heaps = chunk.split("memoryTypes:")[0].split("memoryHeaps[")[1:]
-                        for heap in heaps:  # Check all heaps, not just the first one
-                            if "MEMORY_HEAP_DEVICE_LOCAL_BIT" in heap and "size" in heap:
-                                match = re.search(r"size\s*=\s*(\d+)", heap)
-                                if match:
-                                    dmem = int(match.group(1))
-                                    if dmem > gpumem_ignore_limit_min and dmem < gpumem_ignore_limit_max:
-                                        lowestvkmem = dmem if lowestvkmem==0 else (dmem if dmem<lowestvkmem else lowestvkmem)
-                        gpuidx += 1
-                except Exception: # failed to get vulkan vram
-                    pass
+                output = run_subprocess(['vulkaninfo'])
+                if output:
+                    try: # Try get vulkan memory (experimental)
+                        devicechunks = output.split("VkPhysicalDeviceMemoryProperties")[1:]
+                        gpuidx = 0
+                        for chunk in devicechunks:
+                            heaps = chunk.split("memoryTypes:")[0].split("memoryHeaps[")[1:]
+                            for heap in heaps:  # Check all heaps, not just the first one
+                                if "MEMORY_HEAP_DEVICE_LOCAL_BIT" in heap and "size" in heap:
+                                    match = re.search(r"size\s*=\s*(\d+)", heap)
+                                    if match:
+                                        dmem = int(match.group(1))
+                                        if dmem > gpumem_ignore_limit_min and dmem < gpumem_ignore_limit_max:
+                                            lowestvkmem = dmem if lowestvkmem==0 else (dmem if dmem<lowestvkmem else lowestvkmem)
+                            gpuidx += 1
+                    except Exception: # failed to get vulkan vram
+                        pass
             return lowestvkmem
         except Exception:
             pass
