@@ -517,6 +517,51 @@ class HardwareMonitor:
 
 hardware_monitor = HardwareMonitor()
 
+class SimpleVectorStore:
+    def __init__(self):
+        self.vectors = [] # List of tuples (text, vector_list)
+        self.lock = threading.Lock()
+
+    def normalize(self, v):
+        norm = math.sqrt(sum(x * x for x in v))
+        if norm == 0:
+            return v
+        return [x / norm for x in v]
+
+    def ingest(self, text, vector):
+        # vector is a list of floats
+        if not vector or not text:
+            return
+        norm_v = self.normalize(vector)
+        with self.lock:
+            # Check if text already exists, replace it
+            for i, (t, v) in enumerate(self.vectors):
+                if t == text:
+                    self.vectors[i] = (text, norm_v)
+                    return
+            self.vectors.append((text, norm_v))
+
+    def clear(self):
+        with self.lock:
+            self.vectors = []
+
+    def query(self, query_vector, k=3):
+        if not self.vectors:
+            return []
+
+        q_norm = self.normalize(query_vector)
+        scores = []
+        with self.lock:
+            for text, vec in self.vectors:
+                # Cosine similarity for normalized vectors is just dot product
+                score = sum(a * b for a, b in zip(q_norm, vec))
+                scores.append((score, text))
+
+        scores.sort(key=lambda x: x[0], reverse=True)
+        return [text for score, text in scores[:k]]
+
+vector_store = SimpleVectorStore()
+
 class StdoutRedirector:
     def __init__(self, writer):
         self.writer = writer
@@ -1987,7 +2032,49 @@ def generate(genparams, stream_flag=False):
         except Exception:
             pass
 
-        return {"text":outstr,"status":ret.status,"stopreason":ret.stopreason,"prompt_tokens":ret.prompt_tokens, "completion_tokens": ret.completion_tokens}
+        # Parse Game State
+        game_state = {}
+        try:
+            # Match [[ key = value ]] or [[ key += value ]]
+            # We want to capture the whole block to remove it, and the content to parse it
+            # Support multiple assignments in one block? Or multiple blocks?
+            # Let's support multiple blocks first.
+            pattern = r'\[\[\s*(.*?)\s*\]\]'
+            matches = list(re.finditer(pattern, outstr))
+            for match in matches:
+                content = match.group(1)
+                # Parse content "health = 10", "gold += 50"
+                # Split by comma if multiple? "health=10, gold=50"
+                parts = content.split(',')
+                for part in parts:
+                    part = part.strip()
+                    op = None
+                    if "+=" in part: op = "+="
+                    elif "-=" in part: op = "-="
+                    elif "=" in part: op = "="
+
+                    if op:
+                        k, v = part.split(op, 1)
+                        k = k.strip()
+                        v = v.strip()
+                        # Try parsing value as number
+                        try:
+                            if "." in v: v = float(v)
+                            else: v = int(v)
+                        except ValueError:
+                            pass # keep as string
+
+                        game_state[k] = {"value": v, "op": op}
+
+            # Remove blocks from output text
+            if len(matches) > 0:
+                outstr = re.sub(pattern, '', outstr)
+                # cleanup double spaces?
+                outstr = re.sub(r'  +', ' ', outstr)
+        except Exception as e:
+            print(f"Game State Parse Error: {e}")
+
+        return {"text":outstr,"status":ret.status,"stopreason":ret.stopreason,"prompt_tokens":ret.prompt_tokens, "completion_tokens": ret.completion_tokens, "game_state": game_state}
 
 def sd_get_info():
     info = handle.sd_get_info()
@@ -3503,6 +3590,7 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
             genout = run_blocking()
 
         recvtxt = genout['text']
+        game_state = genout.get('game_state', {})
         prompttokens = genout['prompt_tokens']
         comptokens = genout['completion_tokens']
         currfinishreason = "error" if (genout['stopreason'] == -2) else ("length" if (genout['stopreason'] != 1) else "stop")
@@ -3538,7 +3626,7 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
                     currfinishreason = "tool_calls"
 
         if api_format == 1:
-            res = {"data": {"seqs": [recvtxt]}}
+            res = {"data": {"seqs": [recvtxt], "game_state": game_state}}
         elif api_format == 3:
             res = {"id": "cmpl-A1", "object": "text_completion", "created": int(time.time()), "model": friendlymodelname,
                    "usage": {"prompt_tokens": prompttokens, "completion_tokens": comptokens, "total_tokens": (prompttokens+comptokens)},
@@ -3556,7 +3644,7 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
         elif api_format == 7:
             res = {"model": friendlymodelname,"created_at": str(datetime.now(timezone.utc).isoformat()),"message":{"role":"assistant","content":recvtxt},"done": True,"done_reason":currfinishreason,"total_duration": 1,"load_duration": 1,"prompt_eval_count": prompttokens,"prompt_eval_duration": 1,"eval_count": comptokens,"eval_duration": 1}
         else: #kcpp format
-            res = {"results": [{"text": recvtxt, "tool_calls": tool_calls, "finish_reason": currfinishreason, "logprobs":logprobsdict, "prompt_tokens": prompttokens, "completion_tokens": comptokens}]}
+            res = {"results": [{"text": recvtxt, "tool_calls": tool_calls, "game_state": game_state, "finish_reason": currfinishreason, "logprobs":logprobsdict, "prompt_tokens": prompttokens, "completion_tokens": comptokens}]}
 
         try:
             return res
@@ -4611,6 +4699,53 @@ Change Mode<br>
                     response_body = (json.dumps([]).encode())
             else:
                 response_body = (json.dumps([]).encode())
+
+        elif self.path.endswith('/api/extra/rag/ingest'):
+            if not self.secure_endpoint():
+                return
+            try:
+                tempbody = json.loads(body)
+                chunks = tempbody.get('chunks', [])
+                if chunks and vector_store:
+                    # check if embedding model loaded
+                    if not embeddingsmodelpath:
+                         response_body = (json.dumps({"error":"No embedding model loaded!"}).encode())
+                    else:
+                        # process batches
+                        count = 0
+                        for chunk in chunks:
+                            if chunk and isinstance(chunk, str):
+                                # generate embedding
+                                res = embeddings_generate({"input": chunk})
+                                if res and res["data"] and len(res["data"]) > 0:
+                                    vec = res["data"][0]
+                                    vector_store.ingest(chunk, vec)
+                                    count += 1
+                        response_body = (json.dumps({"success":True, "ingested": count}).encode())
+                else:
+                    vector_store.clear() # clear if empty list sent? No, let's keep it additive unless specific clear endpoint
+                    response_body = (json.dumps({"success":False, "error":"No chunks provided"}).encode())
+            except Exception as e:
+                response_code = 400
+                response_body = (json.dumps({"success": False, "error":str(e)}).encode())
+
+        elif self.path.endswith('/api/extra/rag/query'):
+            if not self.secure_endpoint():
+                return
+            try:
+                tempbody = json.loads(body)
+                query_text = tempbody.get('query', "")
+                k = int(tempbody.get('k', 3))
+                results = []
+                if query_text and vector_store and embeddingsmodelpath:
+                    res = embeddings_generate({"input": query_text})
+                    if res and res["data"] and len(res["data"]) > 0:
+                        query_vec = res["data"][0]
+                        results = vector_store.query(query_vec, k)
+                response_body = (json.dumps({"results": results}).encode())
+            except Exception as e:
+                response_code = 400
+                response_body = (json.dumps({"success": False, "error":str(e)}).encode())
 
         elif self.path.startswith(("/api/admin/reload_config")):
             resp = {"success": False}
@@ -8810,7 +8945,160 @@ def kcpp_main_process(launch_args, g_memory=None, gui_launcher=False):
   <div id="hw-warn" style="color:#ff4444;margin-top:4px;font-weight:bold;display:none;animation:blink 1s infinite;">⚠️ THROTTLING</div>
   <style>@keyframes blink{50%{opacity:0.5;}}</style>
 </div>
+
+<!-- RPG Panel -->
+<div id="rpg-panel" style="position:fixed;top:60px;right:10px;width:200px;background:rgba(20,20,30,0.95);color:#eee;padding:10px;border-radius:8px;font-size:12px;z-index:99998;font-family:sans-serif;border:1px solid #555;display:none;box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+    <div style="border-bottom:1px solid #555;padding-bottom:5px;margin-bottom:5px;font-weight:bold;display:flex;justify-content:space-between;">
+        <span>RPG Stats</span>
+        <span onclick="document.getElementById('rpg-panel').style.display='none'" style="cursor:pointer;">✖</span>
+    </div>
+    <div id="rpg-stats-list" style="max-height:300px;overflow-y:auto;">
+        <div style="text-align:center;color:#888;">No stats yet...</div>
+    </div>
+    <div style="margin-top:10px;border-top:1px solid #555;padding-top:5px;">
+        <label style="display:flex;align-items:center;margin-bottom:5px;">
+            <input type="checkbox" id="rag-toggle" style="margin-right:5px;"> Enable RAG Lore
+        </label>
+        <button onclick="window.ingestLore()" style="width:100%;background:#334;border:1px solid #556;color:#ccc;cursor:pointer;padding:4px;border-radius:4px;">Index Lorebook</button>
+        <div id="rag-status" style="font-size:10px;color:#aaa;margin-top:2px;text-align:center;"></div>
+    </div>
+</div>
+
+<!-- Toggle Button -->
+<div style="position:fixed;top:10px;right:10px;z-index:99999;">
+    <button onclick="const p=document.getElementById('rpg-panel'); p.style.display = p.style.display==='none'?'block':'none';" style="background:#223;color:#eee;border:1px solid #445;border-radius:4px;padding:5px 10px;cursor:pointer;opacity:0.8;">RPG</button>
+</div>
+
 <script>
+window.gameState = {};
+
+window.updateInventory = function(updates) {
+    const list = document.getElementById('rpg-stats-list');
+    if(!list) return;
+
+    for(const key in updates) {
+        const item = updates[key];
+        const op = item.op;
+        const val = item.value;
+
+        if(op === "=") window.gameState[key] = val;
+        else if(op === "+=") window.gameState[key] = (window.gameState[key] || 0) + val;
+        else if(op === "-=") window.gameState[key] = (window.gameState[key] || 0) - val;
+    }
+
+    // Render
+    if(Object.keys(window.gameState).length === 0) {
+        list.innerHTML = '<div style="text-align:center;color:#888;">No stats yet...</div>';
+    } else {
+        let html = '';
+        for(const key in window.gameState) {
+            html += `<div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+                <span style="font-weight:bold;">${key}:</span>
+                <span>${window.gameState[key]}</span>
+            </div>`;
+        }
+        list.innerHTML = html;
+    }
+};
+
+window.ingestLore = async function() {
+    const status = document.getElementById('rag-status');
+    status.innerText = "Indexing...";
+    try {
+        // Access klite global
+        if(typeof localsettings === 'undefined' || !localsettings.lorebook) {
+            status.innerText = "No Lorebook found!";
+            return;
+        }
+
+        const chunks = [];
+        // klite lorebook is weird, sometimes array sometimes dict
+        const lb = localsettings.lorebook;
+        if(Array.isArray(lb)) {
+             lb.forEach(e => { if(e.content) chunks.push(e.content); });
+        } else {
+             for(const k in lb) { if(lb[k].content) chunks.push(lb[k].content); }
+        }
+
+        if(chunks.length === 0) {
+            status.innerText = "Lorebook empty!";
+            return;
+        }
+
+        const res = await fetch('/api/extra/rag/ingest', {
+            method: 'POST',
+            body: JSON.stringify({chunks: chunks})
+        });
+        const d = await res.json();
+        if(d.success) {
+            status.innerText = `Indexed ${d.ingested} entries.`;
+        } else {
+            status.innerText = "Error: " + d.error;
+        }
+    } catch(e) {
+        status.innerText = "Error: " + e.message;
+    }
+};
+
+// Hook fetch
+const originalFetch = window.fetch;
+window.fetch = async function(url, options) {
+    let response;
+    // RAG Injection Logic
+    if ((url.includes('/generate') || url.includes('/submit')) && options && options.method === 'POST') {
+        const ragEnabled = document.getElementById('rag-toggle') && document.getElementById('rag-toggle').checked;
+        if(ragEnabled) {
+            try {
+                let body = JSON.parse(options.body);
+                let prompt = body.prompt || "";
+
+                // Simple heuristic: last 500 chars of prompt
+                let query = prompt;
+                if(query.length > 500) query = query.slice(-500);
+
+                if(query) {
+                    const ragRes = await originalFetch('/api/extra/rag/query', {
+                        method: 'POST',
+                        body: JSON.stringify({query: query, k: 3})
+                    });
+                    const ragData = await ragRes.json();
+                    if(ragData.results && ragData.results.length > 0) {
+                        const memory = "\\n\\n[RAG Memory]\\n" + ragData.results.join("\\n") + "\\n[End Memory]\\n\\n";
+                        // Prepend
+                        body.prompt = memory + prompt;
+                        options.body = JSON.stringify(body);
+                    }
+                }
+            } catch(e) { console.error("RAG Error", e); }
+        }
+    }
+
+    response = await originalFetch(url, options);
+
+    // Inventory State Logic
+    if ((url.includes('/generate') || url.includes('/submit')) && response.ok) {
+        const clone = response.clone();
+        try {
+            const data = await clone.json();
+            let state = null;
+            // Handle different API formats
+            if(data.results && data.results[0] && data.results[0].game_state) {
+                state = data.results[0].game_state;
+            } else if (data.data && data.data.game_state) {
+                state = data.data.game_state;
+            }
+
+            if(state) {
+                window.updateInventory(state);
+            }
+        } catch(e) {
+            // Streaming response or error, ignore
+        }
+    }
+    return response;
+};
+
+// Hardware Monitor Loop
 (function(){
     setInterval(async ()=>{
       try {
