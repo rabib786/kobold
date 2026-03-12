@@ -209,6 +209,8 @@ struct llama_v2_vocab {
 
     std::unordered_map<token, id> token_to_id;
     std::vector<token_score> id_to_token;
+
+    id bos = 1;
 };
 
 struct llama_v2_context {
@@ -1624,7 +1626,7 @@ static std::vector<llama_v2_vocab::id> llama_v2_tokenize(const llama_v2_vocab & 
     }
 
     if (bos) {
-        output.push_back(llama_v2_token_bos());
+        output.push_back(vocab.bos);
     }
 
     tokenizer.tokenize(text, output);
@@ -2983,7 +2985,7 @@ std::vector<llama_v2_token> legacy_llama_v2_tokenize(const llama_v2_vocab & voca
     }
 
     if (bos) {
-        res.push_back(1); // TODO: replace with vocab.bos
+        res.push_back(vocab.bos);
     }
 
     // Pieces are in reverse order so correct that
@@ -3020,9 +3022,9 @@ std::vector<llama_v2_token> legacy_llama_v2_tokenize(struct llama_v2_context * c
     return res;
 }
 
-std::vector<llama_token> llama_v2_tokenize(struct llama_v2_context * ctx, const std::string & text, bool add_bos) {
+std::vector<llama_v2_token> llama_v2_tokenize(struct llama_v2_context * ctx, const std::string & text, bool add_bos) {
     // initialize to prompt numer of chars, since n_tokens <= n_prompt_chars
-    std::vector<llama_token> res(text.size() + (int) add_bos);
+    std::vector<llama_v2_token> res(text.size() + (int) add_bos);
     const int n = llama_v2_tokenize(ctx, text.c_str(), res.data(), res.size(), add_bos);
     assert(n >= 0);
     res.resize(n);
