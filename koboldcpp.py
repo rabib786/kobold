@@ -3558,6 +3558,12 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
     sys_version = "1"
     server_version = "KoboldCppServer"
 
+    # Compiled Regex Patterns for File Uploads
+    regex_file = re.compile(r'Content-Disposition[^;]*;\s*name=(?:"file"|file)\s*;\s*filename=(?:"([^"]+)"|([^\s";]+))', flags=re.IGNORECASE)
+    regex_image = re.compile(r'Content-Disposition[^;]*;\s*name=(?:"image"|image)\s*;\s*filename=(?:"([^"]+)"|([^\s";]+))', flags=re.IGNORECASE)
+    regex_prompt = re.compile(r'Content-Disposition.*name="prompt"\r\n\r\n(.*)\r\n')
+    regex_language = re.compile(r'Content-Disposition.*name="language"\r\n\r\n(.*)\r\n')
+
     def __init__(self, addr, port):
         self.addr = addr
         self.port = port
@@ -3579,8 +3585,9 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
                 if boundary:
                     fparts = body.split(boundary)
                     for fpart in fparts:
-                        detected_upload_filename = re.findall(r'Content-Disposition[^;]*;\s*name=(?:"file"|file)\s*;\s*filename=(?:"([^"]+)"|([^\s";]+))', fpart.decode('utf-8',errors='ignore'),flags=re.IGNORECASE)
-                        detected_upload_filename_comfy = re.findall(r'Content-Disposition[^;]*;\s*name=(?:"image"|image)\s*;\s*filename=(?:"([^"]+)"|([^\s";]+))', fpart.decode('utf-8',errors='ignore'),flags=re.IGNORECASE)
+                        fpart_decoded = fpart.decode('utf-8',errors='ignore')
+                        detected_upload_filename = self.regex_file.findall(fpart_decoded)
+                        detected_upload_filename_comfy = self.regex_image.findall(fpart_decoded)
                         if detected_upload_filename and len(detected_upload_filename)>0:
                             utfprint(f"Detected uploaded file: {detected_upload_filename[0]}")
                             file_content_start = fpart.find(b'\r\n\r\n') + 4  # Position after headers
@@ -3603,11 +3610,11 @@ class KcppServerRequestHandler(http.server.SimpleHTTPRequestHandler):
                                     result["file"] = base64_string
 
                         # Check for fields
-                        detected_prompt_field = re.findall(r'Content-Disposition.*name="prompt"\r\n\r\n(.*)\r\n', fpart.decode('utf-8', errors='ignore'))
+                        detected_prompt_field = self.regex_prompt.findall(fpart_decoded)
                         if detected_prompt_field and len(detected_prompt_field)>0:
                             result["prompt"] = detected_prompt_field[0].strip()  # Extract and strip whitespace
 
-                        detected_lang_field = re.findall(r'Content-Disposition.*name="language"\r\n\r\n(.*)\r\n', fpart.decode('utf-8', errors='ignore'))
+                        detected_lang_field = self.regex_language.findall(fpart_decoded)
                         if detected_lang_field and len(detected_lang_field)>0:
                             result["language"] = detected_lang_field[0].strip()  # Extract and strip whitespace
 
