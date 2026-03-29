@@ -9003,7 +9003,13 @@ def kcpp_main_process(launch_args, g_memory=None, gui_launcher=False):
     if args.password and args.password!="":
         password = args.password.strip()
 
-    print(args)
+    # Redact sensitive information before printing
+    args_to_print = argparse.Namespace(**vars(args))
+    for var in ["password", "adminpassword", "hordekey", "ssl"]:
+        if hasattr(args_to_print, var) and getattr(args_to_print, var):
+            setattr(args_to_print, var, "********")
+
+    print(args_to_print)
     print("==========")
 
     #handle loading text model
